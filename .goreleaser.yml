@@ -1,0 +1,87 @@
+# GoReleaser configuration for ShadowFS
+# Linux-only FUSE filesystem
+#
+# NOTE: CGO is REQUIRED because go-fuse/v2 depends on libfuse (C library).
+# For cross-compilation, ensure proper C cross-compiler toolchains are installed.
+# See: https://goreleaser.com/cookbooks/cgo-and-crosscompiling/
+
+project_name: shadowfs
+
+# Build configuration
+builds:
+  - id: shadowfs
+    main: ./cmd/shadowfs
+    binary: shadowfs
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+      - arm
+      - 386
+    goarm:
+      - 6
+      - 7
+    tags:
+      - linux
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    env:
+      - CGO_ENABLED=1
+
+# Archive configuration
+archives:
+  - id: default
+    format: tar.gz
+    format_overrides:
+      - goos: linux
+        format: tar.gz
+    files:
+      - LICENSE
+      - README.md
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+# Checksums
+checksum:
+  name_template: 'checksums.txt'
+  algorithm: sha256
+
+# Release notes
+release:
+  github:
+    owner: pleclech
+    name: shadowfs
+  mode: replace
+  header: |
+    ## ShadowFS {{ .Tag }}
+    
+    A FUSE-based versioned overlay filesystem for Linux.
+    
+    ### Changes
+  footer: |
+    ---
+    
+    **Full Changelog**: {{ .GitURL }}/compare/{{ .PreviousTag }}...{{ .Tag }}
+    
+    **Installation**:
+    ```bash
+    # Download the binary for your architecture
+    # Extract and move to PATH
+    sudo mv shadowfs /usr/local/bin/
+    sudo chmod +x /usr/local/bin/shadowfs
+    ```
+
+# Snapshots (for testing)
+snapshot:
+  name_template: "{{ .Tag }}-next"
+
+# Changelog
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
