@@ -12,20 +12,32 @@ import (
 	"syscall"
 	"time"
 
-	shadowfs "github.com/pleclech/shadowfs/fs"
 	"github.com/hanwen/go-fuse/v2/fs"
+	shadowfs "github.com/pleclech/shadowfs/fs"
 )
 
 func unmount(mountPoint string) error {
+	// Try standard unmount first
 	cmd := exec.Command("umount", mountPoint)
-
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return err
+	err := cmd.Run()
+	if err == nil {
+		return nil
 	}
 
-	return nil
+	// If standard unmount fails, try lazy unmount
+	log.Printf("Standard unmount failed, trying lazy unmount...")
+	cmd = exec.Command("umount", "-l", mountPoint)
+	stderr.Reset()
+	cmd.Stderr = &stderr
+	lazyErr := cmd.Run()
+	if lazyErr == nil {
+		return nil
+	}
+
+	// If both fail, return the original error
+	return fmt.Errorf("unmount failed: %v\nLazy unmount also failed: %v", stderr.String(), lazyErr)
 }
 
 func main() {
@@ -70,7 +82,7 @@ func main() {
 	gitSafetyWindow := flag.Duration("git-safety-window", 5*time.Second, "safety window delay after last write before committing")
 	cacheDir := flag.String("cache-dir", "", "custom cache directory (default: ~/.shadowfs, or $SHADOWFS_CACHE_DIR)")
 	flag.Parse()
-	
+
 	if len(flag.Args()) < 2 {
 		log.Fatalf("Usage:\n %s MOUNTPOINT SRCDIR", binaryName)
 	}
@@ -119,18 +131,21 @@ func main() {
 		}
 	}
 
-	c := make(chan os.Signal, 1)
+	c := make(chan os.Signal, 2) // Buffer for multiple signals
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+
+	shutdownComplete := make(chan bool, 1)
+
 	go func() {
-		<-c
-		log.Printf("Received shutdown signal, cleaning up...")
-		
+		sig := <-c
+		log.Printf("Received %v signal, cleaning up...", sig)
+
 		// Cleanup Git resources and commit all pending changes
 		// CleanupGitManager calls CommitAllPending() which commits all uncommitted changes
 		root.CleanupGitManager()
-		
+
 		log.Printf("Git cleanup completed, unmounting filesystem...")
-		
+
 		// Unmount the filesystem - this will make server.Wait() return
 		err := unmount(root.GetMountPoint())
 		if err != nil {
@@ -142,10 +157,30 @@ func main() {
 			// Also call server.Unmount() to ensure server.Wait() returns
 			server.Unmount()
 		}
-		
+
 		log.Printf("Shutdown complete")
+		shutdownComplete <- true
 	}()
 
+	// Wait for either server to stop or shutdown to complete with timeout
+	select {
+	case <-time.After(30 * time.Second):
+		log.Printf("Server wait timeout, forcing exit...")
+		os.Exit(1)
+	case <-shutdownComplete:
+		// Give server a moment to stop gracefully
+		time.Sleep(100 * time.Millisecond)
+		log.Printf("Graceful shutdown completed")
+	}
+
+	// Handle second signal for forceful shutdown
+	go func() {
+		sig := <-c
+		log.Printf("Received second %v signal, forcing exit...", sig)
+		os.Exit(1)
+	}()
+
+	// This should return quickly after unmount, but we have timeout as safety
 	server.Wait()
 	log.Printf("Server stopped, exiting...")
 }
