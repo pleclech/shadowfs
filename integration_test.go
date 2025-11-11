@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -15,6 +16,36 @@ import (
 const (
 	testBinary = "./shadowfs"
 )
+
+// gracefulShutdown sends SIGTERM to the process and waits for it to exit gracefully
+func gracefulShutdown(cmd *exec.Cmd, mountPoint string, t *testing.T) {
+	if cmd.Process != nil {
+		// Send SIGTERM for graceful shutdown (allows Git commits to complete)
+		cmd.Process.Signal(syscall.SIGTERM)
+
+		// Wait for process to exit gracefully (with timeout)
+		done := make(chan error, 1)
+		go func() {
+			done <- cmd.Wait()
+		}()
+
+		select {
+		case <-time.After(5 * time.Second):
+			// Timeout - force kill
+			if cmd.Process != nil {
+				cmd.Process.Kill()
+				cmd.Wait()
+			}
+		case err := <-done:
+			if err != nil {
+				t.Logf("Process exited with error: %v", err)
+			}
+		}
+	}
+
+	// Unmount after process exits
+	exec.Command("umount", mountPoint).Run()
+}
 
 // Helper function to get entry names for debugging
 func getEntryNames(entries []os.DirEntry) []string {
@@ -81,9 +112,7 @@ func TestFilesystem_BasicOperations(t *testing.T) {
 		t.Fatalf("Failed to start filesystem: %v", err)
 	}
 	defer func() {
-		cmd.Process.Kill()
-		cmd.Wait()
-		exec.Command("umount", mountPoint).Run()
+		gracefulShutdown(cmd, mountPoint, t)
 	}()
 
 	// Wait for filesystem to be ready
@@ -162,9 +191,7 @@ func TestFilesystem_DirectoryOperations(t *testing.T) {
 		t.Fatalf("Failed to start filesystem: %v", err)
 	}
 	defer func() {
-		cmd.Process.Kill()
-		cmd.Wait()
-		exec.Command("umount", mountPoint).Run()
+		gracefulShutdown(cmd, mountPoint, t)
 	}()
 
 	// Wait for filesystem to be ready
@@ -245,9 +272,7 @@ func TestFilesystem_DeletionTracking(t *testing.T) {
 		t.Fatalf("Failed to start filesystem: %v", err)
 	}
 	defer func() {
-		cmd.Process.Kill()
-		cmd.Wait()
-		exec.Command("umount", mountPoint).Run()
+		gracefulShutdown(cmd, mountPoint, t)
 	}()
 
 	// Wait for filesystem to be ready
@@ -302,9 +327,7 @@ func TestFilesystem_PermissionPreservation(t *testing.T) {
 		t.Fatalf("Failed to start filesystem: %v", err)
 	}
 	defer func() {
-		cmd.Process.Kill()
-		cmd.Wait()
-		exec.Command("umount", mountPoint).Run()
+		gracefulShutdown(cmd, mountPoint, t)
 	}()
 
 	// Wait for filesystem to be ready
@@ -367,9 +390,7 @@ func TestFilesystem_SessionPersistence(t *testing.T) {
 		t.Fatalf("Failed to start second filesystem: %v", err)
 	}
 	defer func() {
-		cmd2.Process.Kill()
-		cmd2.Wait()
-		exec.Command("umount", mountPoint).Run()
+		gracefulShutdown(cmd2, mountPoint, t)
 	}()
 
 	// Wait for filesystem to be ready
@@ -405,9 +426,7 @@ func TestFilesystem_ConcurrentOperations(t *testing.T) {
 		t.Fatalf("Failed to start filesystem: %v", err)
 	}
 	defer func() {
-		cmd.Process.Kill()
-		cmd.Wait()
-		exec.Command("umount", mountPoint).Run()
+		gracefulShutdown(cmd, mountPoint, t)
 	}()
 
 	// Wait for filesystem to be ready
@@ -493,9 +512,7 @@ func TestFilesystem_GitOperations(t *testing.T) {
 		t.Fatalf("Failed to start filesystem: %v", err)
 	}
 	defer func() {
-		cmd.Process.Kill()
-		cmd.Wait()
-		exec.Command("umount", mountPoint).Run()
+		gracefulShutdown(cmd, mountPoint, t)
 	}()
 
 	// Wait for filesystem to be ready
@@ -608,9 +625,7 @@ func TestVersionList_WithPattern(t *testing.T) {
 		t.Fatalf("Failed to start filesystem: %v", err)
 	}
 	defer func() {
-		cmd.Process.Kill()
-		cmd.Wait()
-		exec.Command("umount", mountPoint).Run()
+		gracefulShutdown(cmd, mountPoint, t)
 	}()
 
 	// Wait for filesystem to be ready
@@ -679,9 +694,7 @@ func TestVersionDiff_WithPattern(t *testing.T) {
 		t.Fatalf("Failed to start filesystem: %v", err)
 	}
 	defer func() {
-		cmd.Process.Kill()
-		cmd.Wait()
-		exec.Command("umount", mountPoint).Run()
+		gracefulShutdown(cmd, mountPoint, t)
 	}()
 
 	// Wait for filesystem to be ready
@@ -738,9 +751,7 @@ func TestVersionLog_WithPattern(t *testing.T) {
 		t.Fatalf("Failed to start filesystem: %v", err)
 	}
 	defer func() {
-		cmd.Process.Kill()
-		cmd.Wait()
-		exec.Command("umount", mountPoint).Run()
+		gracefulShutdown(cmd, mountPoint, t)
 	}()
 
 	// Wait for filesystem to be ready
