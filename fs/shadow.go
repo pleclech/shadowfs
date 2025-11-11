@@ -101,7 +101,6 @@ func (n *ShadowNode) InitGitManager(config GitConfig) error {
 	}
 
 	// Create activity tracker
-	fmt.Printf("InitGitManager: creating activity tracker for mountPoint=%s\n", n.mountPoint)
 	n.activityTracker = NewActivityTracker(n, config)
 
 	return nil
@@ -358,24 +357,9 @@ func (n *ShadowNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.Att
 		// Special fix for .git directories to ensure they always have correct permissions
 		if strings.Contains(p, ".git") && (out.Mode&0111 == 0) {
 			out.Mode = 0040755 // Force correct directory permissions for .git
-			if strings.Contains(p, ".git") {
-				fmt.Printf("DEBUG Getattr: FORCED correct directory mode for .git %s to %o\n", p, out.Mode)
-			}
 		} else if out.Mode&0111 == 0 { // No execute bits
 			out.Mode |= 0755 // Add standard directory permissions
-			if strings.Contains(p, ".git") {
-				fmt.Printf("DEBUG Getattr: Fixed directory mode for %s to %o\n", p, out.Mode)
-			}
-		} else {
-			if strings.Contains(p, ".git") {
-				fmt.Printf("DEBUG Getattr: Directory %s already has execute bits, mode=%o\n", p, out.Mode)
-			}
 		}
-	}
-
-	if strings.Contains(p, ".git") {
-		fmt.Printf("DEBUG Getattr: path=%s, st.Mode=%o, out.Mode=%o (after FromStat)\n", p, st.Mode, out.Mode)
-		fmt.Printf("DEBUG Getattr: FINAL returning mode=%o for %s\n", out.Mode, p)
 	}
 
 	return fs.OK
@@ -761,8 +745,8 @@ func (n *ShadowNode) Mkdir(ctx context.Context, name string, mode uint32, out *f
 
 	ch := n.NewInode(ctx, node, n.idFromStat(&st))
 
-	// Invalidate kernel cache to ensure correct permissions are visible
-	n.NotifyEntry(name)
+	// Don't invalidate cache immediately after creation - this can cause issues
+	// n.NotifyEntry(name)
 
 	return ch, 0
 }
@@ -1437,7 +1421,7 @@ func (n *ShadowNode) Write(ctx context.Context, f fs.FileHandle, data []byte, of
 			var sourceSt syscall.Stat_t
 			if err := syscall.Lstat(sourcePath, &sourceSt); err == nil && sourceSt.Size > 0 {
 				// Source file exists and has content - copy it to cache before writing
-				Debug("Copy-on-write: copying %s to %s", sourcePath, p)
+
 				if n.helpers != nil {
 					if errno := n.helpers.CopyFile(sourcePath, p); errno != 0 {
 						return 0, errno

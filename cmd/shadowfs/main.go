@@ -123,19 +123,31 @@ func main() {
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-c
-		// Cleanup Git resources
+		log.Printf("Received shutdown signal, cleaning up...")
+		
+		// Cleanup Git resources and commit all pending changes
+		// CleanupGitManager calls CommitAllPending() which commits all uncommitted changes
 		root.CleanupGitManager()
-
+		
+		log.Printf("Git cleanup completed, unmounting filesystem...")
+		
+		// Unmount the filesystem - this will make server.Wait() return
 		err := unmount(root.GetMountPoint())
 		if err != nil {
-			err := server.Unmount()
-			if err != nil {
-				log.Fatalf("Unmount fail: %v\n", err)
+			// Try server.Unmount() as fallback
+			if err := server.Unmount(); err != nil {
+				log.Printf("Warning: Unmount failed: %v", err)
 			}
+		} else {
+			// Also call server.Unmount() to ensure server.Wait() returns
+			server.Unmount()
 		}
+		
+		log.Printf("Shutdown complete")
 	}()
 
 	server.Wait()
+	log.Printf("Server stopped, exiting...")
 }
 
 func printMainUsage(binaryName string) {
