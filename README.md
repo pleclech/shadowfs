@@ -915,6 +915,30 @@ cat ~/.shadowfs/daemons/<mount-id>.pid
 - Stale PID files (process died) are detected and cleaned up
 - Manual cleanup: `rm ~/.shadowfs/daemons/<mount-id>.pid`
 
+### Daemon Logging
+
+When running in daemon mode, all stdout and stderr output is redirected to a log file for debugging:
+
+```bash
+# Log files are stored alongside PID files
+ls ~/.shadowfs/daemons/
+# Output: <mount-id>.pid  <mount-id>.log
+
+# View daemon logs
+tail -f ~/.shadowfs/daemons/<mount-id>.log
+
+# Check log file location using info command
+shadowfs info --mount-point /mnt/overlay
+# Shows: Log File: ~/.shadowfs/daemons/<mount-id>.log
+```
+
+**Log File Location:**
+- Stored in `~/.shadowfs/daemons/<mount-id>.log`
+- Created automatically when daemon starts
+- Contains all stdout/stderr output from the daemon process
+- Useful for debugging issues like auto-commit not working
+- Logs are appended (not overwritten) on each daemon start
+
 ### Daemon Mode Benefits
 
 - **Background Operation**: Run without keeping terminal open
