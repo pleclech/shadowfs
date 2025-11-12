@@ -306,14 +306,15 @@ func (gm *GitManager) autoCommitFileSync(filePath string, reason string, commitT
 	log.Printf("autoCommitFileSync: Successfully staged file %s", relativePath)
 
 	// Build commit message with type metadata
+	// For single file commits, show file count (not file name to keep it concise)
 	var commitMsg string
 	switch commitType {
 	case "checkpoint":
 		commitMsg = fmt.Sprintf("Checkpoint: %s", reason)
 	case "unmount":
-		commitMsg = fmt.Sprintf("Auto-commit on unmount: %s", reason)
+		commitMsg = "Auto-commit on unmount: 1 file"
 	default: // "auto-save"
-		commitMsg = fmt.Sprintf("Auto-commit: %s", reason)
+		commitMsg = "Auto-commit: 1 file"
 	}
 
 	// Commit with message
@@ -403,15 +404,15 @@ func (gm *GitManager) autoCommitFilesBatchSync(filePaths []string, reason string
 	}
 
 	// Build commit message with type metadata
-	fileList := strings.Join(relativePaths, ", ")
+	// Show file count only (not file list to keep it concise and scalable)
 	var commitMsg string
 	switch commitType {
 	case "checkpoint":
-		commitMsg = fmt.Sprintf("Checkpoint: %s (%d files: %s)", reason, len(relativePaths), fileList)
+		commitMsg = fmt.Sprintf("Checkpoint: %s (%d files)", reason, len(relativePaths))
 	case "unmount":
-		commitMsg = fmt.Sprintf("Auto-commit on unmount: %s (%d files: %s)", reason, len(relativePaths), fileList)
+		commitMsg = fmt.Sprintf("Auto-commit on unmount: %d files", len(relativePaths))
 	default: // "auto-save"
-		commitMsg = fmt.Sprintf("Auto-commit: %s (%d files: %s)", reason, len(relativePaths), fileList)
+		commitMsg = fmt.Sprintf("Auto-commit: %d files", len(relativePaths))
 	}
 
 	// Commit all files together
@@ -499,13 +500,14 @@ func (gm *GitManager) GetConfig() GitConfig {
 
 // LogOptions contains options for git log command
 type LogOptions struct {
-	Format  string   // Custom format string (e.g., "%h %ad %s")
-	Oneline bool     // Use --oneline flag
-	Graph   bool     // Use --graph flag
-	Stat    bool     // Use --stat flag
-	Limit   int      // Limit number of commits (0 = no limit)
-	Paths   []string // Paths to filter commits
-	Since   string   // Show commits since date/time
+	Format   string   // Custom format string (e.g., "%h %ad %s")
+	Oneline  bool     // Use --oneline flag
+	Graph    bool     // Use --graph flag
+	Stat     bool     // Use --stat flag
+	NameOnly bool     // Use --name-only flag to show changed files
+	Limit    int      // Limit number of commits (0 = no limit)
+	Paths    []string // Paths to filter commits
+	Since    string   // Show commits since date/time
 }
 
 // DiffOptions contains options for git diff command
@@ -514,6 +516,9 @@ type DiffOptions struct {
 	CommitArgs []string // Commit arguments (e.g., "HEAD~1", "HEAD")
 	Paths      []string // Paths to filter diff
 }
+
+// ErrNoCommits is returned when git log is run on a repository with no commits
+var ErrNoCommits = fmt.Errorf("no commits found yet")
 
 // executeGitCommand executes a git command with consistent --git-dir and -C flags
 func (gm *GitManager) executeGitCommand(args []string, stdout, stderr io.Writer) error {
@@ -525,11 +530,36 @@ func (gm *GitManager) executeGitCommand(args []string, stdout, stderr io.Writer)
 	if stdout != nil {
 		cmd.Stdout = stdout
 	}
+
+	// Always capture stderr to detect "no commits" error
+	var stderrBuf strings.Builder
 	if stderr != nil {
-		cmd.Stderr = stderr
+		// If caller provided stderr writer, use multi-writer to capture and write
+		cmd.Stderr = io.MultiWriter(stderr, &stderrBuf)
+	} else {
+		cmd.Stderr = &stderrBuf
 	}
 
-	return cmd.Run()
+	err := cmd.Run()
+	if err != nil {
+		// Always capture stderr for error messages
+		stderrStr := strings.TrimSpace(stderrBuf.String())
+
+		// Check if this is a "no commits" error
+		if strings.Contains(stderrStr, "does not have any commits yet") ||
+			(strings.Contains(stderrStr, "your current branch") && strings.Contains(stderrStr, "does not have any commits")) {
+			return ErrNoCommits
+		}
+
+		// Wrap error with git stderr output for better error messages
+		if stderrStr != "" {
+			return fmt.Errorf("git error: %s: %w", stderrStr, err)
+		}
+
+		return fmt.Errorf("git command failed: %w", err)
+	}
+
+	return nil
 }
 
 // StatusPorcelain returns a list of changed files using git status --porcelain
@@ -584,8 +614,11 @@ func (gm *GitManager) Log(options LogOptions, stdout io.Writer) error {
 		args = append(args, "--graph")
 	}
 
+	// --stat and --name-only are mutually exclusive
 	if options.Stat {
 		args = append(args, "--stat")
+	} else if options.NameOnly {
+		args = append(args, "--name-only")
 	}
 
 	if options.Since != "" {

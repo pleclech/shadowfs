@@ -96,12 +96,18 @@ func runVersionList(args []string) {
 	}
 
 	// Use GitManager's Log method
+	// Add --name-only by default to show changed files
 	options := shadowfs.LogOptions{
-		Format: "%h %ad %s",
-		Limit:  *limit,
-		Paths:  expandedPaths,
+		Format:   "%h %ad %s",
+		Limit:    *limit,
+		Paths:    expandedPaths,
+		NameOnly: true, // Show file names by default
 	}
 	if err := gm.Log(options, os.Stdout); err != nil {
+		if err == shadowfs.ErrNoCommits {
+			fmt.Println("No commits found yet. Make some changes and they will be automatically committed.")
+			return
+		}
 		log.Fatalf("Failed to run git log: %v", err)
 	}
 }
@@ -182,6 +188,10 @@ func runVersionDiff(args []string) {
 		Paths:      expandedPaths,
 	}
 	if err := gm.Diff(options, os.Stdout); err != nil {
+		if err == shadowfs.ErrNoCommits {
+			fmt.Println("No commits found yet. Make some changes and they will be automatically committed.")
+			return
+		}
 		log.Fatalf("Failed to run git diff: %v", err)
 	}
 }
@@ -289,13 +299,19 @@ func runVersionLog(args []string) {
 	}
 
 	// Use GitManager's Log method
+	// Add --name-only by default unless --oneline is used (oneline is more compact)
 	options := shadowfs.LogOptions{
-		Oneline: *oneline,
-		Graph:   *graph,
-		Stat:    *stat,
-		Paths:   expandedPaths,
+		Oneline:  *oneline,
+		Graph:    *graph,
+		Stat:     *stat,
+		NameOnly: !*oneline, // Show file names unless oneline is requested
+		Paths:    expandedPaths,
 	}
 	if err := gm.Log(options, os.Stdout); err != nil {
+		if err == shadowfs.ErrNoCommits {
+			fmt.Println("No commits found yet. Make some changes and they will be automatically committed.")
+			return
+		}
 		log.Fatalf("Failed to run git log: %v", err)
 	}
 }

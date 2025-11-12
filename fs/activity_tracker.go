@@ -162,7 +162,7 @@ func (at *ActivityTracker) commitFile(filePath string) {
 
 	// Commit the file if it has significant changes (outside lock to avoid blocking)
 	if at.hasSignificantChanges(filePath) {
-		// Build commit reason with timing info
+		// Reason is no longer used in commit message (kept for logging/debugging)
 		reason := fmt.Sprintf("Auto-commit after idle period (idle: %v, last-write: %v ago)", 
 			at.config.IdleTimeout, timeSinceLastWrite)
 		Debug("commitFile: Calling AutoCommitFile for %s with reason: %s", filePath, reason)

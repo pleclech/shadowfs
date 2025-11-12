@@ -42,7 +42,6 @@ func FindCacheDirectory(mountPoint string) (string, error) {
 			continue
 		}
 		sessionPath := cache.GetSessionPath(baseDir, mountID)
-		fmt.Printf("Debug: in FindCacheDirectory, sessionPath: %s, mountID: %s\n", sessionPath, mountID)
 		// Check if cache directory exists by checking for .target or .root
 		targetFile := cache.GetTargetFilePath(sessionPath)
 		if _, err := os.Stat(targetFile); err == nil {
