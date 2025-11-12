@@ -2,6 +2,7 @@ package fs
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -104,6 +105,12 @@ func (n *ShadowNode) Write(ctx context.Context, f fs.FileHandle, data []byte, of
 				if err := syscall.Fstat(fd, &st); err == nil {
 					// File size is now properly updated
 
+				}
+				// Also sync parent directory to ensure directory entry is written to disk
+				// This is especially important in daemon mode where timing can be critical
+				if dirFd, err := syscall.Open(filepath.Dir(p), syscall.O_RDONLY, 0); err == nil {
+					syscall.Fsync(dirFd)
+					syscall.Close(dirFd)
 				}
 			}
 		}

@@ -17,8 +17,46 @@ import (
 )
 
 const (
-	testBinary = "./shadowfs"
+	testBinary = "/tmp/shadowfs-test"
 )
+
+var (
+	binaryBuilt = false
+)
+
+// TestMain builds the binary once before all tests and cleans up after
+func TestMain(m *testing.M) {
+	// Build binary once for all tests
+	if err := buildBinary(); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to build binary: %v\n", err)
+		os.Exit(1)
+	}
+	binaryBuilt = true
+
+	// Run all tests
+	code := m.Run()
+
+	// Clean up binary after all tests complete
+	if binaryBuilt {
+		os.Remove(testBinary)
+	}
+
+	os.Exit(code)
+}
+
+// buildBinary builds the test binary
+func buildBinary() error {
+	// Check if binary already exists (from previous run)
+	if _, err := os.Stat(testBinary); err == nil {
+		// Binary exists, remove it to ensure fresh build
+		os.Remove(testBinary)
+	}
+
+	cmd := exec.Command("go", "build", "-o", testBinary, "./cmd/shadowfs")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
 
 // gracefulShutdown sends SIGTERM to the process and waits for it to exit gracefully
 func gracefulShutdown(cmd *exec.Cmd, mountPoint string, t *testing.T) {
@@ -81,12 +119,6 @@ func TestFilesystem_BasicOperations(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
-
-	// Build binary
-	if err := exec.Command("go", "build", "-o", testBinary, "./cmd/shadowfs").Run(); err != nil {
-		t.Fatalf("Failed to build binary: %v", err)
-	}
-	defer os.Remove(testBinary)
 
 	mountPoint := t.TempDir()
 	srcDir := t.TempDir()
@@ -179,12 +211,6 @@ func TestFilesystem_DirectoryOperations(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	// Build binary
-	if err := exec.Command("go", "build", "-o", testBinary, "./cmd/shadowfs").Run(); err != nil {
-		t.Fatalf("Failed to build binary: %v", err)
-	}
-	defer os.Remove(testBinary)
-
 	mountPoint := t.TempDir()
 	srcDir := t.TempDir()
 
@@ -254,12 +280,6 @@ func TestFilesystem_DeletionTracking(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	// Build binary
-	if err := exec.Command("go", "build", "-o", testBinary, "./cmd/shadowfs").Run(); err != nil {
-		t.Fatalf("Failed to build binary: %v", err)
-	}
-	defer os.Remove(testBinary)
-
 	mountPoint := t.TempDir()
 	srcDir := t.TempDir()
 
@@ -309,12 +329,6 @@ func TestFilesystem_PermissionPreservation(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	// Build binary
-	if err := exec.Command("go", "build", "-o", testBinary, "./cmd/shadowfs").Run(); err != nil {
-		t.Fatalf("Failed to build binary: %v", err)
-	}
-	defer os.Remove(testBinary)
-
 	mountPoint := t.TempDir()
 	srcDir := t.TempDir()
 
@@ -354,12 +368,6 @@ func TestFilesystem_SessionPersistence(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
-
-	// Build binary
-	if err := exec.Command("go", "build", "-o", testBinary, "./cmd/shadowfs").Run(); err != nil {
-		t.Fatalf("Failed to build binary: %v", err)
-	}
-	defer os.Remove(testBinary)
 
 	mountPoint := t.TempDir()
 	srcDir := t.TempDir()
@@ -413,12 +421,6 @@ func TestFilesystem_ConcurrentOperations(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
-
-	// Build binary
-	if err := exec.Command("go", "build", "-o", testBinary, "./cmd/shadowfs").Run(); err != nil {
-		t.Fatalf("Failed to build binary: %v", err)
-	}
-	defer os.Remove(testBinary)
 
 	mountPoint := t.TempDir()
 	srcDir := t.TempDir()
@@ -497,12 +499,6 @@ func TestFilesystem_GitOperations(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
-
-	// Build binary
-	if err := exec.Command("go", "build", "-o", testBinary, "./cmd/shadowfs").Run(); err != nil {
-		t.Fatalf("Failed to build binary: %v", err)
-	}
-	defer os.Remove(testBinary)
 
 	mountPoint := t.TempDir()
 	srcDir := t.TempDir()
@@ -615,12 +611,6 @@ func TestFilesystem_GitAutoCommitPathConversion(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	// Build binary
-	if err := exec.Command("go", "build", "-o", testBinary, "./cmd/shadowfs").Run(); err != nil {
-		t.Fatalf("Failed to build binary: %v", err)
-	}
-	defer os.Remove(testBinary)
-
 	mountPoint := t.TempDir()
 	srcDir := t.TempDir()
 
@@ -644,7 +634,8 @@ func TestFilesystem_GitAutoCommitPathConversion(t *testing.T) {
 	}
 
 	// Wait for auto-commit to happen (idle timeout + safety window + some buffer)
-	time.Sleep(2 * time.Second)
+	// With 5s idle timeout + 1s safety window, we need at least 6s + buffer
+	time.Sleep(7 * time.Second)
 
 	// Verify git repository was created
 	// git init creates .gitofs/.git/, so check for .gitofs/.git
@@ -688,12 +679,6 @@ func TestFilesystem_AppendOperation(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
-
-	// Build binary
-	if err := exec.Command("go", "build", "-o", testBinary, "./cmd/shadowfs").Run(); err != nil {
-		t.Fatalf("Failed to build binary: %v", err)
-	}
-	defer os.Remove(testBinary)
 
 	mountPoint := t.TempDir()
 	srcDir := t.TempDir()
@@ -776,12 +761,6 @@ func TestVersionList_WithPattern(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	// Build binary
-	if err := exec.Command("go", "build", "-o", testBinary, "./cmd/shadowfs").Run(); err != nil {
-		t.Fatalf("Failed to build binary: %v", err)
-	}
-	defer os.Remove(testBinary)
-
 	mountPoint := t.TempDir()
 	srcDir := t.TempDir()
 
@@ -844,12 +823,6 @@ func TestVersionDiff_WithPattern(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	// Build binary
-	if err := exec.Command("go", "build", "-o", testBinary, "./cmd/shadowfs").Run(); err != nil {
-		t.Fatalf("Failed to build binary: %v", err)
-	}
-	defer os.Remove(testBinary)
-
 	mountPoint := t.TempDir()
 	srcDir := t.TempDir()
 
@@ -900,12 +873,6 @@ func TestVersionLog_WithPattern(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	// Build binary
-	if err := exec.Command("go", "build", "-o", testBinary, "./cmd/shadowfs").Run(); err != nil {
-		t.Fatalf("Failed to build binary: %v", err)
-	}
-	defer os.Remove(testBinary)
-
 	mountPoint := t.TempDir()
 	srcDir := t.TempDir()
 
@@ -955,12 +922,6 @@ func TestSecurity_RenameVulnerability(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
-
-	// Build binary
-	if err := exec.Command("go", "build", "-o", testBinary, "./cmd/shadowfs").Run(); err != nil {
-		t.Fatalf("Failed to build binary: %v", err)
-	}
-	defer os.Remove(testBinary)
 
 	mountPoint := t.TempDir()
 	srcDir := t.TempDir()
@@ -1059,12 +1020,6 @@ func TestSecurity_RenameComprehensive(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
-
-	// Build binary
-	if err := exec.Command("go", "build", "-o", testBinary, "./cmd/shadowfs").Run(); err != nil {
-		t.Fatalf("Failed to build binary: %v", err)
-	}
-	defer os.Remove(testBinary)
 
 	mountPoint := t.TempDir()
 	srcDir := t.TempDir()
@@ -1191,12 +1146,6 @@ func TestFilesystem_MkdirAfterUnlink(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	// Build binary
-	if err := exec.Command("go", "build", "-o", testBinary, "./cmd/shadowfs").Run(); err != nil {
-		t.Fatalf("Failed to build binary: %v", err)
-	}
-	defer os.Remove(testBinary)
-
 	mountPoint := t.TempDir()
 	srcDir := t.TempDir()
 
@@ -1259,5 +1208,235 @@ func TestFilesystem_MkdirAfterUnlink(t *testing.T) {
 		t.Fatalf("Failed to read file in directory: %v", err)
 	} else if string(content) != "test" {
 		t.Errorf("Expected 'test', got '%s'", string(content))
+	}
+}
+
+func TestFilesystem_FirstWriteAutoCommit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	mountPoint := t.TempDir()
+	srcDir := t.TempDir()
+
+	// Create a file in source directory with initial content
+	testFile := filepath.Join(srcDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("initial"), 0644); err != nil {
+		t.Fatalf("Failed to create source file: %v", err)
+	}
+
+	// Start filesystem with git auto-commit enabled
+	// Use 5s idle timeout and 1s safety window for testing
+	cmd := exec.Command(testBinary, "-auto-git", "-git-idle-timeout", "1s", "-git-safety-window", "500ms", mountPoint, srcDir)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Failed to start filesystem: %v", err)
+	}
+	defer func() {
+		gracefulShutdown(cmd, mountPoint, t)
+	}()
+
+	// Wait for filesystem to be ready
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify git repository was created
+	gitDir := filepath.Join(mountPoint, shadowfs.GitofsName, ".git")
+	if stat, err := os.Stat(gitDir); err != nil || !stat.IsDir() {
+		t.Fatalf("Git repository not created: %v", err)
+	}
+
+	mountedFile := filepath.Join(mountPoint, "test.txt")
+
+	// Verify file exists initially
+	if _, err := os.Stat(mountedFile); os.IsNotExist(err) {
+		t.Fatalf("File should exist initially: %v", err)
+	}
+
+	// First append to existing file (this should trigger auto-commit)
+	// This is the bug scenario: first modification of existing file
+	f, err := os.OpenFile(mountedFile, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatalf("Failed to open file for append: %v", err)
+	}
+	if _, err := f.WriteString("bar\n"); err != nil {
+		t.Fatalf("Failed to append to file: %v", err)
+	}
+	f.Close()
+
+	// Wait for auto-commit to happen (idle timeout + safety window + some buffer)
+	// With 5s idle timeout + 1s safety window, we need at least 6s + buffer
+	time.Sleep(2 * time.Second)
+
+	// Verify first commit was created
+	gitCmd := exec.Command("git", "--git-dir", gitDir, "-C", mountPoint, "log", "--oneline", "-1")
+	output, err := gitCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Failed to run git log: %v, output: %s", err, string(output))
+	}
+
+	if len(output) == 0 {
+		t.Error("Expected first commit after append, but git log is empty")
+	}
+
+	// Count commits before second append
+	gitCmd = exec.Command("git", "--git-dir", gitDir, "-C", mountPoint, "rev-list", "--count", "HEAD")
+	output, err = gitCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Failed to count commits: %v, output: %s", err, string(output))
+	}
+	firstCommitCount := strings.TrimSpace(string(output))
+	if firstCommitCount == "0" {
+		t.Error("Expected at least one commit after first append")
+	}
+
+	// Second append to existing file (this should also trigger auto-commit)
+	f, err = os.OpenFile(mountedFile, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatalf("Failed to open file for second append: %v", err)
+	}
+	if _, err := f.WriteString("foo\n"); err != nil {
+		t.Fatalf("Failed to append to file second time: %v", err)
+	}
+	f.Close()
+
+	// Wait for auto-commit to happen again
+	// With 5s idle timeout + 1s safety window, we need at least 6s + buffer
+	time.Sleep(2 * time.Second)
+
+	// Verify second commit was created
+	gitCmd = exec.Command("git", "--git-dir", gitDir, "-C", mountPoint, "rev-list", "--count", "HEAD")
+	output, err = gitCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Failed to count commits: %v, output: %s", err, string(output))
+	}
+	secondCommitCount := strings.TrimSpace(string(output))
+	if secondCommitCount == firstCommitCount {
+		t.Errorf("Expected second commit after second append, but commit count didn't increase (was %s, still %s)", firstCommitCount, secondCommitCount)
+	}
+
+	// Verify file content is correct
+	content, err := os.ReadFile(mountedFile)
+	if err != nil {
+		t.Fatalf("Failed to read file: %v", err)
+	}
+	expectedContent := "initialbar\nfoo\n"
+	if string(content) != expectedContent {
+		t.Errorf("File content mismatch: expected %q, got %q", expectedContent, string(content))
+	}
+}
+
+func TestFilesystem_FirstWriteAutoCommit_DaemonMode(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	mountPoint := t.TempDir()
+	srcDir := t.TempDir()
+
+	// Create a file in source directory with initial content
+	testFile := filepath.Join(srcDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("initial"), 0644); err != nil {
+		t.Fatalf("Failed to create source file: %v", err)
+	}
+
+	// Start filesystem with git auto-commit enabled in daemon mode
+	// Use 5s idle timeout and 1s safety window for testing
+	cmd := exec.Command(testBinary, "-daemon", "-auto-git", "-git-idle-timeout", "1s", "-git-safety-window", "500ms", mountPoint, srcDir)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Failed to start filesystem: %v", err)
+	}
+	defer func() {
+		// Stop daemon gracefully
+		stopCmd := exec.Command(testBinary, "stop", "--mount-point", mountPoint)
+		stopCmd.Run()
+		// Also try unmounting just in case
+		exec.Command("umount", mountPoint).Run()
+	}()
+
+	// Wait for daemon to start and filesystem to be ready
+	time.Sleep(500 * time.Millisecond)
+
+	// Verify git repository was created
+	gitDir := filepath.Join(mountPoint, shadowfs.GitofsName, ".git")
+	if stat, err := os.Stat(gitDir); err != nil || !stat.IsDir() {
+		t.Fatalf("Git repository not created: %v", err)
+	}
+
+	mountedFile := filepath.Join(mountPoint, "test.txt")
+
+	// Verify file exists initially
+	if _, err := os.Stat(mountedFile); os.IsNotExist(err) {
+		t.Fatalf("File should exist initially: %v", err)
+	}
+
+	// First append to existing file (this should trigger auto-commit)
+	// This is the bug scenario: first modification of existing file in daemon mode
+	f, err := os.OpenFile(mountedFile, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatalf("Failed to open file for append: %v", err)
+	}
+	if _, err := f.WriteString("bar\n"); err != nil {
+		t.Fatalf("Failed to append to file: %v", err)
+	}
+	f.Close()
+
+	// Wait for auto-commit to happen (idle timeout + safety window + some buffer)
+	// With 5s idle timeout + 1s safety window, we need at least 6s + buffer
+	time.Sleep(2 * time.Second)
+
+	// Verify first commit was created
+	gitCmd := exec.Command("git", "--git-dir", gitDir, "-C", mountPoint, "log", "--oneline", "-1")
+	output, err := gitCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Failed to run git log: %v, output: %s", err, string(output))
+	}
+
+	if len(output) == 0 {
+		t.Error("Expected first commit after append in daemon mode, but git log is empty")
+	}
+
+	// Count commits before second append
+	gitCmd = exec.Command("git", "--git-dir", gitDir, "-C", mountPoint, "rev-list", "--count", "HEAD")
+	output, err = gitCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Failed to count commits: %v, output: %s", err, string(output))
+	}
+	firstCommitCount := strings.TrimSpace(string(output))
+	if firstCommitCount == "0" {
+		t.Error("Expected at least one commit after first append in daemon mode")
+	}
+
+	// Second append to existing file (this should also trigger auto-commit)
+	f, err = os.OpenFile(mountedFile, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatalf("Failed to open file for second append: %v", err)
+	}
+	if _, err := f.WriteString("foo\n"); err != nil {
+		t.Fatalf("Failed to append to file second time: %v", err)
+	}
+	f.Close()
+
+	// Wait for auto-commit to happen again
+	// With 5s idle timeout + 1s safety window, we need at least 6s + buffer
+	time.Sleep(2 * time.Second)
+
+	// Verify second commit was created
+	gitCmd = exec.Command("git", "--git-dir", gitDir, "-C", mountPoint, "rev-list", "--count", "HEAD")
+	output, err = gitCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Failed to count commits: %v, output: %s", err, string(output))
+	}
+	secondCommitCount := strings.TrimSpace(string(output))
+	if secondCommitCount == firstCommitCount {
+		t.Errorf("Expected second commit after second append in daemon mode, but commit count didn't increase (was %s, still %s)", firstCommitCount, secondCommitCount)
+	}
+
+	// Verify file content is correct
+	content, err := os.ReadFile(mountedFile)
+	if err != nil {
+		t.Fatalf("Failed to read file: %v", err)
+	}
+	expectedContent := "initialbar\nfoo\n"
+	if string(content) != expectedContent {
+		t.Errorf("File content mismatch: expected %q, got %q", expectedContent, string(content))
 	}
 }

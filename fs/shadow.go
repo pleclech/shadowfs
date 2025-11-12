@@ -693,16 +693,21 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 			p = cachedPath
 			n.mirrorPath = cachedPath
 
-			// If copy-on-write happened, sync and track activity before opening file handle
+			// If copy-on-write happened, sync the file before opening file handle
+			// Note: We don't track activity here - activity tracking happens in Write() after actual writes
 			if copyOnWriteHappened && forceCache {
 				// Open file temporarily to sync it, ensuring it's written to disk
 				// This ensures git can see the file when checking changes
 				if syncFd, err := syscall.Open(cachedPath, syscall.O_RDONLY, 0); err == nil {
 					syscall.Fsync(syncFd)
 					syscall.Close(syncFd)
+					// Also sync parent directory to ensure directory entry is written to disk
+					// This is especially important in daemon mode where timing can be critical
+					if dirFd, err := syscall.Open(filepath.Dir(cachedPath), syscall.O_RDONLY, 0); err == nil {
+						syscall.Fsync(dirFd)
+						syscall.Close(dirFd)
+					}
 				}
-				// Track activity so git knows the file exists
-				n.HandleWriteActivity(cachedPath)
 			}
 		} else if forceCache {
 			// Need to create file in cache for write operations
@@ -752,16 +757,21 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 				n.mirrorPath = cachedPath
 			}
 
-			// If copy-on-write happened, sync and track activity before opening file handle
+			// If copy-on-write happened, sync the file before opening file handle
+			// Note: We don't track activity here - activity tracking happens in Write() after actual writes
 			if copyOnWriteHappened {
 				// Open file temporarily to sync it, ensuring it's written to disk
 				// This ensures git can see the file when checking changes
 				if syncFd, err := syscall.Open(cachedPath, syscall.O_RDONLY, 0); err == nil {
 					syscall.Fsync(syncFd)
 					syscall.Close(syncFd)
+					// Also sync parent directory to ensure directory entry is written to disk
+					// This is especially important in daemon mode where timing can be critical
+					if dirFd, err := syscall.Open(filepath.Dir(cachedPath), syscall.O_RDONLY, 0); err == nil {
+						syscall.Fsync(dirFd)
+						syscall.Close(dirFd)
+					}
 				}
-				// Track activity so git knows the file exists
-				n.HandleWriteActivity(cachedPath)
 			}
 		} else {
 			// Read-only: use source file directly (no copy needed, no permission check needed)
@@ -793,16 +803,21 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 				}
 			}
 
-			// If copy-on-write happened, sync and track activity before opening file handle
+			// If copy-on-write happened, sync the file before opening file handle
+			// Note: We don't track activity here - activity tracking happens in Write() after actual writes
 			if copyOnWriteHappened && forceCache {
 				// Open file temporarily to sync it, ensuring it's written to disk
 				// This ensures git can see the file when checking changes
 				if syncFd, err := syscall.Open(p, syscall.O_RDONLY, 0); err == nil {
 					syscall.Fsync(syncFd)
 					syscall.Close(syncFd)
+					// Also sync parent directory to ensure directory entry is written to disk
+					// This is especially important in daemon mode where timing can be critical
+					if dirFd, err := syscall.Open(filepath.Dir(p), syscall.O_RDONLY, 0); err == nil {
+						syscall.Fsync(dirFd)
+						syscall.Close(dirFd)
+					}
 				}
-				// Track activity so git knows the file exists
-				n.HandleWriteActivity(p)
 			}
 		} else {
 			// CRITICAL: File doesn't exist at current mirrorPath
