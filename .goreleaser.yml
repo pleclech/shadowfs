@@ -18,12 +18,8 @@ builds:
       - linux
     goarch:
       - amd64
-      - arm64
-      - arm
-      - 386
     goarm:
       - 6
-      - 7
     tags:
       - linux
     flags:
@@ -32,25 +28,6 @@ builds:
       - -s -w
     env:
       - CGO_ENABLED=1
-
-  # macOS builds (experimental/untested)
-  # NOTE: Requires macOS SDK - typically only builds on macOS hosts
-  # Cross-compilation from Linux to macOS with CGO is complex and may not work
-  - id: shadowfs-darwin
-    main: ./cmd/shadowfs
-    binary: shadowfs
-    goos:
-      - darwin
-    goarch:
-      - amd64
-      - arm64
-    flags:
-      - -trimpath
-    ldflags:
-      - -s -w
-    env:
-      - CGO_ENABLED=1
-    skip: false  # Set to true to skip macOS builds if SDK unavailable
 
 # Archive configuration
 archives:
