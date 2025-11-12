@@ -41,6 +41,10 @@ func (n *ShadowNode) GetMountPoint() string {
 	return n.mountPoint
 }
 
+func (n *ShadowNode) GetMountID() string {
+	return n.mountID
+}
+
 // InitGitManager initializes Git functionality for auto-versioning
 func (n *ShadowNode) InitGitManager(config GitConfig) error {
 	n.gitManager = NewGitManager(n.mountPoint, n.srcDir, config)

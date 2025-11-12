@@ -54,3 +54,21 @@ func GetTargetFilePath(sessionPath string) string {
 	return filepath.Join(sessionPath, ".target")
 }
 
+// GetDaemonDirPath returns the daemon directory path for storing PID files
+func GetDaemonDirPath() (string, error) {
+	baseDir, err := GetCacheBaseDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(baseDir, "daemons"), nil
+}
+
+// GetDaemonPIDFilePath returns the PID file path for a mount ID
+func GetDaemonPIDFilePath(mountID string) (string, error) {
+	daemonDir, err := GetDaemonDirPath()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(daemonDir, mountID+".pid"), nil
+}
+

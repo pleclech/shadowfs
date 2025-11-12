@@ -65,6 +65,9 @@ func main() {
 		case "backups":
 			runBackupsCommand(os.Args[2:])
 			return
+		case "stop":
+			runStopCommand(os.Args[2:])
+			return
 		case "help":
 			if len(os.Args) > 2 {
 				printSubcommandHelp(os.Args[2], binaryName)
@@ -81,6 +84,7 @@ func main() {
 	gitIdleTimeout := flag.Duration("git-idle-timeout", 30*time.Second, "idle timeout for auto-commits")
 	gitSafetyWindow := flag.Duration("git-safety-window", 5*time.Second, "safety window delay after last write before committing")
 	cacheDir := flag.String("cache-dir", "", "custom cache directory (default: ~/.shadowfs, or $SHADOWFS_CACHE_DIR)")
+	daemon := flag.Bool("daemon", false, "run as daemon in background")
 	flag.Parse()
 
 	if len(flag.Args()) < 2 {
@@ -136,6 +140,17 @@ func main() {
 		}
 	}
 
+	// Write PID file if running as daemon
+	if *daemon {
+		mountID := root.GetMountID()
+		sourceDir := flag.Arg(1)
+		if err := writePIDFile(mountID, root.GetMountPoint(), sourceDir); err != nil {
+			log.Printf("Warning: Failed to write PID file: %v", err)
+		} else {
+			log.Printf("Daemon PID file written: %s", mountID)
+		}
+	}
+
 	c := make(chan os.Signal, 2) // Buffer for multiple signals
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 
@@ -157,6 +172,14 @@ func main() {
 		root.CleanupGitManager()
 
 		log.Printf("Git cleanup completed, unmounting filesystem...")
+
+		// Remove PID file if running as daemon
+		if *daemon {
+			mountID := root.GetMountID()
+			if err := removePIDFile(mountID); err != nil {
+				log.Printf("Warning: Failed to remove PID file: %v", err)
+			}
+		}
 
 		// Unmount the filesystem - this will make server.Wait() return
 		err := unmount(root.GetMountPoint())
@@ -199,16 +222,19 @@ Flags for mount:
   -git-idle-timeout       Idle timeout for auto-commits (default: 30s)
   -git-safety-window      Safety window delay after last write before committing (default: 5s)
   -cache-dir              Custom cache directory (default: ~/.shadowfs, or $SHADOWFS_CACHE_DIR)
+  -daemon                 Run as daemon in background
 
 Examples:
   %s /mnt/shadow /home/user/source
+  %s -daemon /mnt/shadow /home/user/source
+  %s stop --mount-point /mnt/shadow
   %s version list --mount-point /mnt/shadow
   %s checkpoint --mount-point /mnt/shadow
   %s sync --mount-point /mnt/shadow --dry-run
   %s backups list
 
 Use "%s help <command>" for command-specific help.
-`, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName)
+`, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName)
 }
 
 func printSubcommandHelp(command string, binaryName string) {
