@@ -739,7 +739,9 @@ shadowfs/
 │       ├── sync.go            # Sync and backup commands
 │       └── validation.go     # Input validation helpers
 ├── fs/                         # Core filesystem implementation
-│   ├── shadow.go              # Main FUSE implementation
+│   ├── shadow.go              # Core ShadowNode struct and main FUSE operations
+│   ├── shadow_fuse_directory.go # FUSE directory operations (Mkdir, Rmdir, Opendir, Readdir)
+│   ├── shadow_fuse_readwrite.go # FUSE read/write operations (Read, Write, CopyFileRange)
 │   ├── shadow_helpers.go      # Helper functions (buffer pools, file copy)
 │   ├── shadowfs_linux.go      # Linux-specific filesystem code
 │   ├── git_manager.go         # Git auto-versioning manager
@@ -748,18 +750,32 @@ shadowfs/
 │   ├── sync.go                # Sync operations
 │   ├── dirstream.go           # Directory streaming interface
 │   ├── dirstream_linux.go     # Linux directory streaming implementation
-│   ├── file_operations.go    # File operation helpers
+│   ├── file_operations.go     # File operation helpers
 │   ├── path_manager.go        # Path rebasing and caching
 │   ├── logger.go              # Logging infrastructure
+│   ├── constants.go           # Global constants (HomeName, RootName)
 │   ├── test_helpers.go        # Test infrastructure
 │   ├── shadow_test.go         # Unit tests
-│   ├── shadow_fuse_test.go   # FUSE operation tests
+│   ├── shadow_fuse_test.go    # FUSE operation tests
 │   ├── fuse_functionality_test.go  # FUSE functionality tests
 │   ├── git_manager_test.go    # Git manager tests
+│   ├── git_integration_test.go # Git integration tests
 │   ├── version_test.go        # Version management tests
 │   ├── sync_test.go           # Sync operation tests
 │   ├── stress_test.go         # Performance/stress tests
-│   └── benchmark_test.go      # Performance benchmarks
+│   ├── benchmark_test.go      # Performance benchmarks
+│   ├── xattr/                 # Extended attributes package
+│   │   └── xattr.go          # XAttr types and operations
+│   ├── utils/                 # Utility functions package
+│   │   ├── validation.go     # Path validation utilities
+│   │   └── permissions.go    # Permission management utilities
+│   ├── rootinit/              # Root initialization package
+│   │   ├── setup.go          # Directory and file creation utilities
+│   │   └── root.go           # Mount point validation and root creation
+│   ├── pathutil/              # Path utilities package
+│   │   └── path.go           # Path rebasing utilities
+│   └── cache/                 # Cache/mirror operations package
+│       └── mirror.go          # Cache mirroring and file copy operations
 ├── integration_test.go         # Full FUSE integration tests
 ├── LICENSE                     # MIT License
 ├── go.mod                      # Go module definition
@@ -770,6 +786,19 @@ shadowfs/
 │       └── release.yml        # Automated release workflow
 └── README.md                   # This file
 ```
+
+**Package Organization:**
+
+The filesystem implementation is organized into logical packages for better separation of concerns:
+
+- **`fs/xattr/`**: Extended attributes handling for file deletion tracking
+- **`fs/utils/`**: Reusable utilities for validation and permissions management
+- **`fs/rootinit/`**: Root filesystem initialization and mount point validation
+- **`fs/pathutil/`**: Path rebasing utilities for converting between source, cache, and mount paths
+- **`fs/cache/`**: Cache mirroring operations and file copy utilities
+- **`fs/shadow_fuse_directory.go`**: FUSE directory operations (Mkdir, Rmdir, Opendir, Readdir)
+- **`fs/shadow_fuse_readwrite.go`**: FUSE read/write operations (Read, Write, CopyFileRange)
+- **`fs/shadow.go`**: Core ShadowNode struct and remaining FUSE operations (Lookup, Getattr, Setattr, Create, Open, Unlink, Symlink, Readlink, Link, Rename)
 
 ### Building
 

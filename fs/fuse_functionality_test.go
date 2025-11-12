@@ -4,6 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/pleclech/shadowfs/fs/rootinit"
+	"github.com/pleclech/shadowfs/fs/xattr"
 )
 
 // TestFUSE_FileCreation tests file creation functionality
@@ -120,33 +123,33 @@ func TestFUSE_ShadowXAttrOperations(t *testing.T) {
 	}
 
 	// Test setting shadow xattr
-	xattr := &ShadowXAttr{ShadowPathStatus: ShadowPathStatusDeleted}
-	errno := SetShadowXAttr(testFile, xattr)
+	attr := &xattr.XAttr{PathStatus: xattr.PathStatusDeleted}
+	errno := xattr.Set(testFile, attr)
 	if errno != 0 {
 		t.Errorf("SetShadowXAttr failed: %v", errno)
 	}
 
 	// Test getting shadow xattr
-	var retrievedAttr ShadowXAttr
-	exists, errno := GetShadowXAttr(testFile, &retrievedAttr)
+	var retrievedAttr xattr.XAttr
+	exists, errno := xattr.Get(testFile, &retrievedAttr)
 	if errno != 0 {
 		t.Errorf("GetShadowXAttr failed: %v", errno)
 	}
 	if !exists {
 		t.Error("Xattr should exist after setting")
 	}
-	if retrievedAttr.ShadowPathStatus != ShadowPathStatusDeleted {
-		t.Errorf("Expected ShadowPathStatusDeleted, got %d", retrievedAttr.ShadowPathStatus)
+	if retrievedAttr.PathStatus != xattr.PathStatusDeleted {
+		t.Errorf("Expected PathStatusDeleted, got %d", retrievedAttr.PathStatus)
 	}
 
 	// Test IsPathDeleted function
-	if !IsPathDeleted(retrievedAttr) {
+	if !xattr.IsPathDeleted(retrievedAttr) {
 		t.Error("IsPathDeleted should return true for deleted file")
 	}
 
 	// Test with normal status
-	normalAttr := &ShadowXAttr{ShadowPathStatus: ShadowPathStatusNone}
-	if IsPathDeleted(*normalAttr) {
+	normalAttr := &xattr.XAttr{PathStatus: xattr.PathStatusNone}
+	if xattr.IsPathDeleted(*normalAttr) {
 		t.Error("IsPathDeleted should return false for normal file")
 	}
 }
@@ -160,7 +163,7 @@ func TestFUSE_WriteFileOnce(t *testing.T) {
 	testFile := filepath.Join(ts.CacheDir, "test_write_once.txt")
 	content := []byte("content written once")
 
-	err := writeFileOnce(testFile, content, 0644)
+	err := rootinit.WriteFileOnce(testFile, content, 0644)
 	if err != nil {
 		t.Errorf("writeFileOnce failed: %v", err)
 	}
@@ -175,7 +178,7 @@ func TestFUSE_WriteFileOnce(t *testing.T) {
 	}
 
 	// Test writing again (should not overwrite)
-	err = writeFileOnce(testFile, []byte("new content"), 0644)
+	err = rootinit.WriteFileOnce(testFile, []byte("new content"), 0644)
 	if err != nil {
 		t.Errorf("writeFileOnce should not fail when file exists: %v", err)
 	}

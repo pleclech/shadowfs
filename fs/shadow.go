@@ -4,71 +4,21 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
-	iofs "io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
-	"unsafe"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+
+	"github.com/pleclech/shadowfs/fs/cache"
+	"github.com/pleclech/shadowfs/fs/pathutil"
+	"github.com/pleclech/shadowfs/fs/rootinit"
+	"github.com/pleclech/shadowfs/fs/utils"
+	"github.com/pleclech/shadowfs/fs/xattr"
 )
-
-const ShadowXattrName = "user.shadow-fs"
-
-const HomeName = ".shadowfs"
-
-const RootName = ".root"
-
-type ShadowPathStatus int
-
-const (
-	ShadowPathStatusNone    ShadowPathStatus = iota
-	ShadowPathStatusDeleted                  // file is deleted in cache
-)
-
-type ShadowXAttr struct {
-	ShadowPathStatus ShadowPathStatus
-}
-
-const ShadowXAttrSZ = int(unsafe.Sizeof(ShadowXAttr{}))
-
-func ShadowXAttrToBytes(attr *ShadowXAttr) []byte {
-	return (*(*[ShadowXAttrSZ]byte)(unsafe.Pointer(attr)))[:]
-}
-
-func ShadowXAttrFromBytes(data []byte) *ShadowXAttr {
-	if len(data) < ShadowXAttrSZ {
-		// Return zero-initialized struct if data is too short
-		return &ShadowXAttr{}
-	}
-	return (*ShadowXAttr)(unsafe.Pointer(&data[0]))
-}
-
-func GetShadowXAttr(path string, attr *ShadowXAttr) (exists bool, errno syscall.Errno) {
-	_, err := syscall.Getxattr(path, ShadowXattrName, ShadowXAttrToBytes(attr))
-
-	// skip if xattr not found
-	if os.IsNotExist(err) {
-		return false, 0
-	}
-
-	if err != nil && err != syscall.ENODATA {
-		return false, fs.ToErrno(err)
-	}
-
-	return true, 0
-}
-
-func SetShadowXAttr(path string, attr *ShadowXAttr) syscall.Errno {
-	return fs.ToErrno(syscall.Setxattr(path, ShadowXattrName, ShadowXAttrToBytes(attr), 0))
-}
-
-func IsPathDeleted(attr ShadowXAttr) bool {
-	return attr.ShadowPathStatus&ShadowPathStatusDeleted != 0
-}
 
 type ShadowNode struct {
 	fs.LoopbackNode
@@ -205,7 +155,7 @@ func (r *ShadowNode) idFromStat(st *syscall.Stat_t) fs.StableAttr {
 
 func (n *ShadowNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	// Validate name parameter to prevent path traversal
-	if !validateNameParameter(name) {
+	if !utils.ValidateName(name) {
 		return nil, syscall.EPERM
 	}
 
@@ -242,10 +192,10 @@ func (n *ShadowNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut
 			if n.helpers != nil {
 				deleted, errno = n.helpers.CheckFileDeleted(mirrorPath)
 			} else {
-				xattr := ShadowXAttr{}
-				exists, errno := GetShadowXAttr(mirrorPath, &xattr)
+				attr := xattr.XAttr{}
+				exists, errno := xattr.Get(mirrorPath, &attr)
 				if errno == 0 {
-					deleted = exists && IsPathDeleted(xattr)
+					deleted = exists && xattr.IsPathDeleted(attr)
 				}
 			}
 
@@ -265,10 +215,10 @@ func (n *ShadowNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut
 			if n.helpers != nil {
 				deleted, errno = n.helpers.CheckFileDeleted(mirrorPath)
 			} else {
-				xattr := ShadowXAttr{}
-				exists, errno := GetShadowXAttr(mirrorPath, &xattr)
+				attr := xattr.XAttr{}
+				exists, errno := xattr.Get(mirrorPath, &attr)
 				if errno == 0 {
-					deleted = exists && IsPathDeleted(xattr)
+					deleted = exists && xattr.IsPathDeleted(attr)
 				}
 			}
 
@@ -321,7 +271,7 @@ func (n *ShadowNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut
 			pathToFix = p
 		}
 		// Fix permissions immediately - don't wait
-		if err := ensureDirPermissions(pathToFix); err != nil {
+		if err := utils.EnsureDirPermissions(pathToFix); err != nil {
 
 			// Continue - we'll fix st.Mode below
 		} else {
@@ -421,7 +371,7 @@ func (n *ShadowNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.Att
 	if st.Mode&syscall.S_IFDIR != 0 {
 		// Always fix permissions for directories - don't just check
 		// This is critical because FUSE might cache wrong attributes
-		if err := ensureDirPermissions(p); err != nil {
+		if err := utils.EnsureDirPermissions(p); err != nil {
 
 			// Continue - we'll fix st.Mode below
 		} else {
@@ -549,102 +499,22 @@ func (n *ShadowNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetA
 	return fs.OK
 }
 
-// validateNameParameter validates FUSE name parameter to prevent path traversal
-// Fast check - only validates the name component, not the full path
-func validateNameParameter(name string) bool {
-	// Reject names containing path traversal sequences
-	if strings.Contains(name, "..") {
-		return false
-	}
-	// Reject absolute paths (shouldn't happen from FUSE, but be safe)
-	if filepath.IsAbs(name) {
-		return false
-	}
-	// Reject empty names
-	if name == "" {
-		return false
-	}
-	return true
-}
-
-// validatePathWithinRoot validates that a path stays within the specified root directory
-// Returns the cleaned path and an error if the path escapes the root boundary
-// Only use this for paths that may have been constructed from user input
-func validatePathWithinRoot(path, root string) (string, error) {
-	cleaned := filepath.Clean(path)
-
-	// Convert to absolute paths for comparison
-	var absPath string
-	var err error
-	if filepath.IsAbs(cleaned) {
-		absPath = cleaned
-	} else {
-		absPath, err = filepath.Abs(cleaned)
-		if err != nil {
-			return "", err
-		}
-	}
-
-	absRoot, err := filepath.Abs(root)
-	if err != nil {
-		return "", err
-	}
-
-	// Ensure the path is within the root directory
-	// Check if absPath is exactly absRoot or is a subdirectory of absRoot
-	if absPath != absRoot && !strings.HasPrefix(absPath+string(os.PathSeparator), absRoot+string(os.PathSeparator)) {
-		return "", syscall.EPERM
-	}
-
-	return cleaned, nil
-}
-
 // preserveOwner sets uid and gid of `path` according to the caller information
 // in `ctx`.
 func (n *ShadowNode) preserveOwner(ctx context.Context, path string) error {
-	if os.Getuid() != 0 {
-		return nil
-	}
-	caller, ok := fuse.FromContext(ctx)
-	if !ok {
-		return nil
-	}
-	return syscall.Lchown(path, int(caller.Uid), int(caller.Gid))
+	return utils.PreserveOwner(ctx, path)
 }
 
 // ensureDirPermissions ensures a directory has proper execute permissions.
 // It checks if the path is a directory and ensures it has at least 0755 permissions.
 // Always chmods to ensure kernel sees correct permissions immediately.
 func ensureDirPermissions(path string) error {
-	var st syscall.Stat_t
-	if err := syscall.Lstat(path, &st); err != nil {
-		return err
-	}
-
-	// Check if it's actually a directory
-	if st.Mode&syscall.S_IFDIR == 0 {
-		return syscall.ENOTDIR
-	}
-
-	// Get current permissions (only permission bits, not file type)
-	currentMode := st.Mode & 0777
-
-	// Ensure at least 0755 (rwxr-xr-x) - directories need execute bits to be traversable
-	// Preserve higher permissions if they exist, but always ensure execute bits
-	requiredMode := currentMode | 0755
-
-	// Always chmod to ensure kernel sees correct permissions immediately
-	// This is important for FUSE filesystems where kernel might cache wrong attributes
-	if err := syscall.Chmod(path, requiredMode); err != nil {
-		return err
-	}
-
-	return nil
+	return utils.EnsureDirPermissions(path)
 }
 
 func (n *ShadowNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (inode *fs.Inode, fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
 	// Validate name parameter to prevent path traversal
-	if !validateNameParameter(name) {
+	if !utils.ValidateName(name) {
 		return nil, nil, 0, syscall.EPERM
 	}
 
@@ -654,14 +524,14 @@ func (n *ShadowNode) Create(ctx context.Context, name string, flags uint32, mode
 	p := n.RebasePathUsingCache(sourcePath)
 
 	// Since we're always using cache path, check if file is deleted in cache
-	xattr := ShadowXAttr{}
+	attr := xattr.XAttr{}
 	var xattrErrno syscall.Errno
-	isPathInCache, xattrErrno := GetShadowXAttr(p, &xattr)
+	isPathInCache, xattrErrno := xattr.Get(p, &attr)
 	if xattrErrno != 0 && xattrErrno != syscall.ENODATA {
 		return nil, nil, 0, xattrErrno
 	}
 
-	if isPathInCache && IsPathDeleted(xattr) {
+	if isPathInCache && xattr.IsPathDeleted(attr) {
 		// File was deleted - remove the deletion marker and shadow file
 		// Create new empty file (don't restore from source - cache is independent)
 		err := syscall.Unlink(p)
@@ -669,13 +539,13 @@ func (n *ShadowNode) Create(ctx context.Context, name string, flags uint32, mode
 			return nil, nil, 0, fs.ToErrno(err)
 		}
 		// Remove the xattr deletion marker
-		syscall.Removexattr(p, ShadowXattrName)
+		syscall.Removexattr(p, xattr.Name)
 	}
 
 	// need to create file in cache
 	// create directory if not exists recursively using same permissions
 	parentDir := filepath.Dir(p)
-	cachedDir, err := n.createMirroredDir(parentDir)
+	cachedDir, err := cache.CreateMirroredDir(parentDir, n.cachePath, n.srcDir)
 	if err != nil && cachedDir != n.cachePath {
 		return nil, nil, 0, fs.ToErrno(err)
 	}
@@ -688,7 +558,7 @@ func (n *ShadowNode) Create(ctx context.Context, name string, flags uint32, mode
 	// CRITICAL: Ensure parent directory has execute permissions for Git operations
 	// This is especially important for .git directory when git creates files inside it
 	// But only fix if we can access it (not for security tests)
-	if err := ensureDirPermissions(cachedDir); err != nil {
+	if err := utils.EnsureDirPermissions(cachedDir); err != nil {
 
 		// Don't fail - try to continue, but this might cause issues
 	}
@@ -711,7 +581,7 @@ func (n *ShadowNode) Create(ctx context.Context, name string, flags uint32, mode
 		return nil, nil, 0, fs.ToErrno(err)
 	}
 
-	n.preserveOwner(ctx, p)
+	utils.PreserveOwner(ctx, p)
 
 	st := syscall.Stat_t{}
 	if err := syscall.Fstat(fd, &st); err != nil {
@@ -791,7 +661,7 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 		} else if forceCache {
 			// Need to create file in cache for write operations
 			// create directory if not exists recursively using same permissions
-			_, err = n.createMirroredDir(filepath.Dir(p))
+			_, err = cache.CreateMirroredDir(filepath.Dir(p), n.cachePath, n.srcDir)
 			if err != nil {
 				return nil, 0, fs.ToErrno(err)
 			}
@@ -851,215 +721,9 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 	return lf, 0, 0
 }
 
-func (n *ShadowNode) Opendir(ctx context.Context) syscall.Errno {
-	fd, err := syscall.Open(n.FullPath(true), syscall.O_DIRECTORY, 0755)
-	if err != nil {
-		return fs.ToErrno(err)
-	}
-	n.preserveOwner(ctx, n.FullPath(true))
-	syscall.Close(fd)
-	return fs.OK
-}
-
-func (n *ShadowNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	return NewShadowDirStream(n, "")
-}
-
-func (n *ShadowNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	// Validate name parameter to prevent path traversal
-	if !validateNameParameter(name) {
-		return nil, syscall.EPERM
-	}
-
-	p := filepath.Join(n.FullPath(false), name)
-
-	// check if directory exists in src
-	st := syscall.Stat_t{}
-	err := syscall.Lstat(p, &st)
-	if err == nil {
-		// directory exists in src use the same mode
-		mode = uint32(st.Mode)
-	}
-
-	// change path to cache
-	p = n.RebasePathUsingCache(p)
-
-	// Ensure parent directory has execute permissions before creating child
-	// This is critical - if parent can't be traversed, child creation will fail
-	parentDir := filepath.Dir(p)
-	if parentDir != p && parentDir != n.cachePath {
-		if err := ensureDirPermissions(parentDir); err != nil {
-
-			// Continue anyway - parent might already have correct permissions
-		}
-	}
-
-	// Ensure directories have execute permissions
-	// Temporarily disable umask to ensure 0755 permissions are set correctly
-	// This is critical - umask can remove execute bits, making directories untraversable
-	oldUmask := syscall.Umask(0)
-	defer syscall.Umask(oldUmask)
-
-	// Always use 0755 for directories to ensure they're traversable
-	dirMode := os.FileMode(0755)
-
-	// Use os.Mkdir - it's simpler and handles mode correctly
-	err = os.Mkdir(p, dirMode)
-	if err != nil {
-		// Handle case where directory already exists (idempotent operation)
-		if os.IsExist(err) {
-			// Directory exists, verify it's actually a directory
-			var st2 syscall.Stat_t
-			if err2 := syscall.Lstat(p, &st2); err2 == nil {
-				if st2.Mode&syscall.S_IFDIR != 0 {
-					// It's a directory, ensure it has proper permissions
-					if err := ensureDirPermissions(p); err != nil {
-						return nil, fs.ToErrno(err)
-					}
-					err = nil
-				} else {
-					// Path exists but is not a directory
-					return nil, fs.ToErrno(err)
-				}
-			} else {
-				return nil, fs.ToErrno(err)
-			}
-		} else {
-			return nil, fs.ToErrno(err)
-		}
-	} else {
-		// Directory was created, ensure it has proper permissions immediately
-		if err := ensureDirPermissions(p); err != nil {
-			syscall.Rmdir(p)
-			return nil, fs.ToErrno(err)
-		}
-	}
-
-	// Stat immediately after creation and permission fix to get attributes
-	st = syscall.Stat_t{}
-	if err := syscall.Lstat(p, &st); err != nil {
-		syscall.Rmdir(p)
-		return nil, fs.ToErrno(err)
-	}
-
-	// Ensure st.Mode has correct directory type and execute bits BEFORE preserveOwner
-	// This ensures preserveOwner sees correct permissions
-	if st.Mode&syscall.S_IFDIR != 0 {
-		permBits := st.Mode & 0777
-		if permBits&0111 == 0 {
-			// Missing execute bits - fix them in filesystem first
-			if err := syscall.Chmod(p, permBits|0755); err != nil {
-
-			}
-			// Update stat to reflect fixed permissions
-			if err := syscall.Lstat(p, &st); err != nil {
-				syscall.Rmdir(p)
-				return nil, fs.ToErrno(err)
-			}
-		}
-	} else {
-		// This shouldn't happen - directory should have S_IFDIR
-		syscall.Rmdir(p)
-		return nil, syscall.ENOTDIR
-	}
-
-	// Now call preserveOwner - it shouldn't affect permissions, only ownership
-	n.preserveOwner(ctx, p)
-
-	// Final stat after preserveOwner to get final attributes
-	if err := syscall.Lstat(p, &st); err != nil {
-		syscall.Rmdir(p)
-		return nil, fs.ToErrno(err)
-	}
-
-	// Ensure st.Mode still has correct directory type and execute bits
-	// preserveOwner shouldn't change permissions, but be safe
-	if st.Mode&syscall.S_IFDIR != 0 {
-		permBits := st.Mode & 0777
-		if permBits&0111 == 0 {
-			// Fix execute bits in stat structure for FromStat
-			st.Mode = (st.Mode &^ 0777) | (permBits | 0755)
-		}
-	} else {
-		// This shouldn't happen
-		st.Mode = (st.Mode &^ syscall.S_IFMT) | syscall.S_IFDIR | 0755
-	}
-
-	// Now call FromStat with the corrected stat structure
-	out.Attr.FromStat(&st)
-
-	node := newShadowNode(n.RootData, n.EmbeddedInode(), name, &st)
-	node.(*ShadowNode).mirrorPath = p
-
-	// Ensure StableAttr has correct mode - idFromStat uses st.Mode directly
-	// We've already fixed st.Mode above, so this should be correct
-	stableAttr := n.idFromStat(&st)
-
-	// Double-check that StableAttr.Mode has correct directory type and execute bits
-	if stableAttr.Mode&0170000 != 0040000 {
-		// Force directory type
-
-		stableAttr.Mode = (stableAttr.Mode &^ 0170000) | 0040000
-	}
-	if stableAttr.Mode&0111 == 0 {
-		// Force execute bits
-
-		stableAttr.Mode |= 0755
-	}
-
-	ch := n.NewInode(ctx, node, stableAttr)
-
-	// Don't invalidate cache immediately after creation - this can cause issues
-	// n.NotifyEntry(name)
-
-	return ch, 0
-}
-
-func (n *ShadowNode) Rmdir(ctx context.Context, name string) syscall.Errno {
-	// Validate name parameter to prevent path traversal
-	if !validateNameParameter(name) {
-		return syscall.EPERM
-	}
-
-	name = filepath.Join(n.FullPath(false), name)
-
-	ds, err := NewShadowDirStream(n, name)
-	if err != 0 {
-		return err
-	}
-	defer ds.Close()
-
-	cnt := 0
-	for ds.HasNext() && cnt == 0 {
-		de, err := ds.Next()
-		if err != 0 {
-			return err
-		}
-		if de.Name == "." || de.Name == ".." {
-			continue
-		}
-		cnt++
-	}
-
-	if cnt != 0 {
-		return syscall.ENOTEMPTY
-	}
-
-	cacheName := n.RebasePathUsingCache(name)
-
-	// set new xattr to indicate file is deleted
-	xattr := ShadowXAttr{}
-	_, errno := GetShadowXAttr(cacheName, &xattr)
-	if errno != 0 {
-		return errno
-	}
-	xattr.ShadowPathStatus |= ShadowPathStatusDeleted
-	return SetShadowXAttr(cacheName, &xattr)
-}
-
 func (n *ShadowNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
 	// Validate name parameters to prevent path traversal
-	if !validateNameParameter(name) || !validateNameParameter(newName) {
+	if !utils.ValidateName(name) || !utils.ValidateName(newName) {
 		return syscall.EPERM
 	}
 
@@ -1092,13 +756,13 @@ func (n *ShadowNode) Rename(ctx context.Context, name string, newParent fs.Inode
 	p1Cache := n.RebasePathUsingCache(p1)
 
 	// check if file is in cache
-	p1xattr := ShadowXAttr{}
-	isp1InCache, errno := GetShadowXAttr(p1Cache, &p1xattr)
+	p1attrXattr := xattr.XAttr{}
+	isp1InCache, errno := xattr.Get(p1Cache, &p1attrXattr)
 	if errno != 0 {
 		return errno
 	}
 
-	if IsPathDeleted(p1xattr) {
+	if xattr.IsPathDeleted(p1attrXattr) {
 		return syscall.ENOENT
 	}
 
@@ -1132,7 +796,7 @@ func (n *ShadowNode) Rename(ctx context.Context, name string, newParent fs.Inode
 	} else {
 		// make a copy of the file at p2 destination
 		// ensure destination directory exists
-		_, err := n.createMirroredDir(filepath.Dir(p2))
+		_, err := cache.CreateMirroredDir(filepath.Dir(p2), n.cachePath, n.srcDir)
 		if err != nil {
 			return fs.ToErrno(err)
 		}
@@ -1154,11 +818,11 @@ func (n *ShadowNode) Rename(ctx context.Context, name string, newParent fs.Inode
 		defer syscall.Close(f1)
 
 		// copy file from p1 to p2 using buffer pool with partial write handling
-		bufPtr, ok := bufferPool.Get().(*[]byte)
+		bufPtr, ok := cache.GetBufferPool().Get().(*[]byte)
 		if !ok {
 			return syscall.ENOMEM
 		}
-		defer bufferPool.Put(bufPtr)
+		defer cache.GetBufferPool().Put(bufPtr)
 		buf := *bufPtr
 
 		for {
@@ -1196,8 +860,8 @@ func (n *ShadowNode) Rename(ctx context.Context, name string, newParent fs.Inode
 	}
 
 	// mark p1 as deleted
-	p1xattr.ShadowPathStatus = ShadowPathStatusDeleted
-	_, err := n.createMirroredDir(filepath.Dir(p1Cache))
+	p1attrXattr.PathStatus = xattr.PathStatusDeleted
+	_, err := cache.CreateMirroredDir(filepath.Dir(p1Cache), n.cachePath, n.srcDir)
 	if err != nil {
 		return fs.ToErrno(err)
 	}
@@ -1222,229 +886,37 @@ func (n *ShadowNode) Rename(ctx context.Context, name string, newParent fs.Inode
 	}
 
 	// mark it as deleted
-	return SetShadowXAttr(p1Cache, &p1xattr)
+	return xattr.Set(p1Cache, &p1attrXattr)
 }
 
 func (n *ShadowNode) RebasePathUsingCache(path string) string {
-	if strings.HasPrefix(path, n.cachePath) {
-		return path
-	}
-	return filepath.Join(n.cachePath, strings.TrimPrefix(path, n.srcDir))
+	return pathutil.RebaseToCache(path, n.cachePath, n.srcDir)
 }
 
 func (n *ShadowNode) RebasePathUsingMountPoint(path string) string {
-	if strings.HasPrefix(path, n.mountPoint) {
-		return path
-	}
-	return filepath.Join(n.mountPoint, strings.TrimPrefix(path, n.cachePath))
+	return pathutil.RebaseToMountPoint(path, n.mountPoint, n.cachePath)
 }
 
 func (n *ShadowNode) RebasePathUsingSrc(path string) string {
-	if strings.HasPrefix(path, n.srcDir) {
-		return path
-	}
-	return filepath.Join(n.srcDir, strings.TrimPrefix(path, n.cachePath))
+	return pathutil.RebaseToSource(path, n.srcDir, n.cachePath)
 }
 
 func (n *ShadowNode) createMirroredDir(path string) (string, error) {
-	// Check if path is already a cache path - if so, use it directly
-	if strings.HasPrefix(path, n.cachePath) {
-		// Path is already in cache, check if it exists and respect its permissions
-		var st syscall.Stat_t
-		if err := syscall.Lstat(path, &st); err != nil {
-			if err == syscall.ENOENT {
-				// Create with default permissions if it doesn't exist
-				err := os.MkdirAll(path, 0755)
-				if err != nil {
-					return path, err
-				}
-			} else {
-				// Other error (likely permission denied accessing parent)
-				return path, err
-			}
-		} else {
-			// Directory exists, check if we have access to it
-			// This respects existing permissions for security tests
-			if err := syscall.Access(path, 0x2|0x1); err != nil { // W_OK | X_OK
-				return path, err
-			}
-		}
-		return path, nil
-	}
-
-	// Original logic for source paths
-	path = n.RebasePathUsingSrc(path)
-
-	srcDir := n.srcDir
-	dstDir := n.cachePath
-
-	path = strings.TrimPrefix(path, srcDir)
-	paths := strings.Split(path, string(os.PathSeparator))
-
-	last := len(paths) - 1
-
-	if last >= 0 && paths[0] == "" {
-		paths = paths[1:]
-		last--
-	}
-
-	// Optimization: use os.MkdirAll for bulk creation, then fix permissions
-	fullCachePath := dstDir
-	for _, dir := range paths {
-		// Validate each directory component doesn't contain path traversal
-		if dir == ".." || dir == "." {
-			return fullCachePath, syscall.EPERM
-		}
-		fullCachePath = filepath.Join(fullCachePath, dir)
-	}
-
-	// Check if directory already exists to respect existing permissions
-	if _, err := os.Stat(fullCachePath); err != nil {
-		if os.IsNotExist(err) {
-			// Directory doesn't exist, create with default permissions
-			err := os.MkdirAll(fullCachePath, 0755)
-			if err != nil {
-				return fullCachePath, err
-			}
-		} else {
-			// Other error accessing directory
-			return fullCachePath, err
-		}
-	}
-
-	// Now fix permissions for each directory level to ensure they're traversable
-	// This is important because os.MkdirAll may preserve existing permissions
-	// which could be missing execute bits
-	currentPath := dstDir
-	for _, dir := range paths {
-		currentPath = filepath.Join(currentPath, dir)
-		// Ensure each directory component has proper execute permissions
-		if err := ensureDirPermissions(currentPath); err != nil {
-			return currentPath, err
-		}
-	}
-
-	return fullCachePath, nil
+	return cache.CreateMirroredDir(path, n.cachePath, n.srcDir)
 }
 
 func (n *ShadowNode) CreateMirroredFileOrDir(path string) (string, error) {
-	// Always use original implementation for Create method to avoid initialization issues
-	path = n.RebasePathUsingSrc(path)
-	cachePath := n.RebasePathUsingCache(path)
-
-	// get src dir mode using syscall
-	var st syscall.Stat_t
-	err := syscall.Lstat(path, &st)
-	if err != nil {
-		return cachePath, err
-	}
-
-	// check if file is a directory
-	if st.Mode&syscall.S_IFDIR != 0 {
-		// create directory in cache using same permissions
-		return n.createMirroredDir(path)
-	}
-
-	// if file is a regular file create it in cache using same permissions
-	if st.Mode&syscall.S_IFREG != 0 {
-		// create directory if not exists recursively using same permissions
-		newDir, err := n.createMirroredDir(filepath.Dir(path))
-		if err != nil {
-			return newDir, err
-		}
-
-		// create empty file using syscall.Open (handles existing files gracefully)
-		fd, err := syscall.Open(cachePath, syscall.O_CREAT|syscall.O_WRONLY|syscall.O_TRUNC, st.Mode)
-		if err != nil {
-			return cachePath, err
-		}
-		syscall.Close(fd)
-
-		// Copy ownership
-		if err := syscall.Chown(cachePath, int(st.Uid), int(st.Gid)); err != nil {
-			return cachePath, err
-		}
-
-		// Copy timestamps
-		var times [2]syscall.Timespec
-		times[0] = syscall.Timespec{Sec: st.Atim.Sec, Nsec: st.Atim.Nsec}
-		times[1] = syscall.Timespec{Sec: st.Mtim.Sec, Nsec: st.Mtim.Nsec}
-		if err := syscall.UtimesNano(cachePath, times[:]); err != nil {
-			return cachePath, err
-		}
-
-		return cachePath, nil
-	}
-
-	return cachePath, syscall.ENOTSUP
+	return cache.CreateMirroredFileOrDir(path, n.cachePath, n.srcDir)
 }
 
 // copyFileSimple copies a file from source to destination (fallback when helpers not available)
 func (n *ShadowNode) copyFileSimple(srcPath, destPath string, mode uint32) syscall.Errno {
-	srcFd, err := syscall.Open(srcPath, syscall.O_RDONLY, 0)
-	if err != nil {
-		return fs.ToErrno(err)
-	}
-	defer syscall.Close(srcFd)
-
-	destFd, err := syscall.Open(destPath, syscall.O_CREAT|syscall.O_WRONLY|syscall.O_TRUNC, mode)
-	if err != nil {
-		return fs.ToErrno(err)
-	}
-	defer syscall.Close(destFd)
-
-	// Get file size
-	var stat syscall.Stat_t
-	err = syscall.Fstat(srcFd, &stat)
-	if err != nil {
-		return fs.ToErrno(err)
-	}
-
-	// Copy file content using buffer pool
-	bufPtr, ok := bufferPool.Get().(*[]byte)
-	if !ok {
-		return syscall.ENOMEM
-	}
-	defer bufferPool.Put(bufPtr)
-	buf := *bufPtr
-
-	for {
-		n, err := syscall.Read(srcFd, buf)
-		if err != nil && err != syscall.EINTR && err != syscall.EAGAIN {
-			return fs.ToErrno(err)
-		}
-		if n == 0 {
-			break
-		}
-
-		offset := 0
-		for offset < n {
-			written, err := syscall.Write(destFd, buf[offset:n])
-			if err != nil {
-				return fs.ToErrno(err)
-			}
-			offset += written
-		}
-	}
-
-	// Copy metadata
-	if err := syscall.Chown(destPath, int(stat.Uid), int(stat.Gid)); err != nil {
-		return fs.ToErrno(err)
-	}
-
-	var times [2]syscall.Timespec
-	times[0] = syscall.Timespec{Sec: stat.Atim.Sec, Nsec: stat.Atim.Nsec}
-	times[1] = syscall.Timespec{Sec: stat.Mtim.Sec, Nsec: stat.Mtim.Nsec}
-	if err := syscall.UtimesNano(destPath, times[:]); err != nil {
-		return fs.ToErrno(err)
-	}
-
-	return 0
+	return cache.CopyFileSimple(srcPath, destPath, mode)
 }
 
 func (n *ShadowNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	// Validate name parameter to prevent path traversal
-	if !validateNameParameter(name) {
+	if !utils.ValidateName(name) {
 		return syscall.EPERM
 	}
 
@@ -1461,10 +933,10 @@ func (n *ShadowNode) Unlink(ctx context.Context, name string) syscall.Errno {
 		deleted, errno = n.helpers.CheckFileDeleted(mirrorPath)
 	} else {
 		// Fallback to original method
-		xattr := ShadowXAttr{}
-		exists, errno := GetShadowXAttr(mirrorPath, &xattr)
+		attr := xattr.XAttr{}
+		exists, errno := xattr.Get(mirrorPath, &attr)
 		if errno == 0 {
-			deleted = exists && IsPathDeleted(xattr)
+			deleted = exists && xattr.IsPathDeleted(attr)
 		}
 	}
 
@@ -1540,8 +1012,8 @@ func (n *ShadowNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	}
 
 	// set new xattr to indicate file is deleted
-	xattr := ShadowXAttr{ShadowPathStatus: ShadowPathStatusDeleted}
-	errno = SetShadowXAttr(deletedPath, &xattr)
+	attr := xattr.XAttr{PathStatus: xattr.PathStatusDeleted}
+	errno = xattr.Set(deletedPath, &attr)
 	if errno != 0 {
 		// Cleanup: if xattr setting failed, remove the shadow file we created
 		// (best effort - ignore cleanup errors)
@@ -1554,7 +1026,7 @@ func (n *ShadowNode) Unlink(ctx context.Context, name string) syscall.Errno {
 
 func (n *ShadowNode) Symlink(ctx context.Context, target, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	// Validate name parameter to prevent path traversal
-	if !validateNameParameter(name) {
+	if !utils.ValidateName(name) {
 		return nil, syscall.EPERM
 	}
 
@@ -1581,7 +1053,7 @@ func (n *ShadowNode) Symlink(ctx context.Context, target, name string, out *fuse
 		return nil, fs.ToErrno(err)
 	}
 
-	n.preserveOwner(ctx, p)
+	utils.PreserveOwner(ctx, p)
 
 	st := syscall.Stat_t{}
 	if err := syscall.Lstat(p, &st); err != nil {
@@ -1614,7 +1086,7 @@ func (n *ShadowNode) Readlink(ctx context.Context) (string, syscall.Errno) {
 
 func (n *ShadowNode) Link(ctx context.Context, target fs.InodeEmbedder, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	// Validate name parameter to prevent path traversal
-	if !validateNameParameter(name) {
+	if !utils.ValidateName(name) {
 		return nil, syscall.EPERM
 	}
 
@@ -1647,7 +1119,7 @@ func (n *ShadowNode) Link(ctx context.Context, target fs.InodeEmbedder, name str
 		return nil, fs.ToErrno(err)
 	}
 
-	n.preserveOwner(ctx, p)
+	utils.PreserveOwner(ctx, p)
 
 	st := syscall.Stat_t{}
 	if err := syscall.Lstat(p, &st); err != nil {
@@ -1664,116 +1136,6 @@ func (n *ShadowNode) Link(ctx context.Context, target fs.InodeEmbedder, name str
 
 	// Return the existing target node, not a new one
 	return target.EmbeddedInode(), 0
-}
-
-func (n *ShadowNode) CopyFileRange(ctx context.Context, fhIn fs.FileHandle, offIn uint64, out *fs.Inode, fhOut fs.FileHandle, offOut uint64, copyLen uint64, flags uint32) (uint32, syscall.Errno) {
-	// For now, implement a basic copy using the file handles
-	// This is a simplified implementation that should work for Git's needs
-
-	// Read from input file handle
-	reader, ok := fhIn.(fs.FileReader)
-	if !ok {
-		return 0, syscall.EBADF
-	}
-	writer, ok := fhOut.(fs.FileWriter)
-	if !ok {
-		return 0, syscall.EBADF
-	}
-
-	// Use buffer pool to reduce allocations
-	bufPtr, ok := bufferPool.Get().(*[]byte)
-	if !ok {
-		return 0, syscall.ENOMEM
-	}
-	defer bufferPool.Put(bufPtr)
-	buf := *bufPtr
-
-	var totalCopied uint64
-
-	for totalCopied < copyLen {
-		// Read chunk from input
-		result, status := reader.Read(ctx, buf, int64(offIn+totalCopied))
-		if status != 0 {
-			return uint32(totalCopied), status
-		}
-		bytesRead, _ := result.Bytes(buf)
-		if len(bytesRead) == 0 {
-			break
-		}
-
-		// Write chunk to output
-		_, writeStatus := writer.Write(ctx, bytesRead, int64(offOut+totalCopied))
-		if writeStatus != 0 {
-			return uint32(totalCopied), writeStatus
-		}
-
-		totalCopied += uint64(len(bytesRead))
-	}
-
-	return uint32(totalCopied), 0
-}
-
-func (n *ShadowNode) Write(ctx context.Context, f fs.FileHandle, data []byte, off int64) (uint32, syscall.Errno) {
-	p := n.FullPath(true)
-
-	// Copy-on-write: if file is in cache but empty, and source exists, copy source content first
-	// Use Lstat() on path for copy-on-write check (path-based, no reflection overhead)
-	if strings.HasPrefix(p, n.cachePath) && off == 0 {
-		var cacheSt syscall.Stat_t
-		if err := syscall.Lstat(p, &cacheSt); err == nil && cacheSt.Size == 0 {
-			// Cache file is empty - check if source has content to copy
-			sourcePath := n.RebasePathUsingSrc(p)
-			var sourceSt syscall.Stat_t
-			if err := syscall.Lstat(sourcePath, &sourceSt); err == nil && sourceSt.Size > 0 {
-				// Source file exists and has content - copy it to cache before writing
-
-				if n.helpers != nil {
-					if errno := n.helpers.CopyFile(sourcePath, p); errno != 0 {
-						return 0, errno
-					}
-				} else {
-					if errno := n.copyFileSimple(sourcePath, p, sourceSt.Mode); errno != 0 {
-						return 0, errno
-					}
-				}
-			}
-		}
-	}
-
-	written, errno := func() (uint32, syscall.Errno) {
-		if fw, ok := f.(fs.FileWriter); ok {
-			return fw.Write(ctx, data, off)
-		}
-		return 0, syscall.EBADF
-	}()
-	if errno == 0 {
-		// CRITICAL: After successful write, ensure file metadata is updated
-		// This prevents git from seeing empty files immediately after write
-		// Try to sync the file to ensure data is written and size is updated
-		if fileWithFd, ok := f.(interface{ Fd() int }); ok {
-			if fd := fileWithFd.Fd(); fd >= 0 {
-				// Force sync to ensure data is written to disk
-				syscall.Fsync(fd)
-				// Update file size by doing fstat
-				var st syscall.Stat_t
-				if err := syscall.Fstat(fd, &st); err == nil {
-					// File size is now properly updated
-
-				}
-			}
-		}
-
-		// Track write activity for Git auto-versioning
-		n.HandleWriteActivity(p)
-	}
-	return written, errno
-}
-
-func (n *ShadowNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
-	if fr, ok := f.(fs.FileReader); ok {
-		return fr.Read(ctx, dest, off)
-	}
-	return nil, syscall.EBADF
 }
 
 func newShadowNode(rootData *fs.LoopbackRoot, parent *fs.Inode, _ string, _ *syscall.Stat_t) fs.InodeEmbedder {
@@ -1797,87 +1159,13 @@ func newShadowNode(rootData *fs.LoopbackRoot, parent *fs.Inode, _ string, _ *sys
 	return n
 }
 
-func createDir(path string, perm iofs.FileMode) error {
-	stat, err := os.Stat(path)
-
-	if err != nil {
-		if os.IsNotExist(err) {
-			if err := os.MkdirAll(path, perm); err != nil {
-				return fmt.Errorf("creating directory error:\n%w", err)
-			}
-			return nil
-		}
-		return fmt.Errorf("stat error:\n%w", err)
-	}
-
-	if !stat.IsDir() {
-		return fmt.Errorf("path must be a directory(%s)", path)
-	}
-
-	return nil
-}
-
-func writeFileOnce(path string, content []byte, perm iofs.FileMode) error {
-	stat, err := os.Stat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			if err := os.WriteFile(path, content, perm); err != nil {
-				return fmt.Errorf("writing file error:\n%w", err)
-			}
-			return nil
-		}
-		return fmt.Errorf("stat error:\n%w", err)
-	}
-	// path must be a file
-	if stat.IsDir() {
-		return fmt.Errorf("path must be a file(%s)", path)
-	}
-	return nil
-}
-
-// validateCacheDirectory validates and prepares a cache directory
-func validateCacheDirectory(path string) error {
-	// Normalize to absolute path
-	absPath, err := filepath.Abs(path)
-	if err != nil {
-		return fmt.Errorf("cannot resolve cache directory path: %w", err)
-	}
-
-	// Check if exists
-	info, err := os.Stat(absPath)
-	if os.IsNotExist(err) {
-		// Create directory
-		if err := os.MkdirAll(absPath, 0755); err != nil {
-			return fmt.Errorf("failed to create cache directory: %w", err)
-		}
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("cannot access cache directory: %w", err)
-	}
-
-	// Check is directory
-	if !info.IsDir() {
-		return fmt.Errorf("cache path is not a directory: %s", absPath)
-	}
-
-	// Check writable (try to create a test file)
-	testFile := filepath.Join(absPath, ".test-write")
-	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
-		return fmt.Errorf("cache directory is not writable: %w", err)
-	}
-	os.Remove(testFile)
-
-	return nil
-}
-
 func NewShadowRoot(inMountPoint, inSrcDir, cacheBaseDir string) (fs.InodeEmbedder, error) {
-	mountPoint, err := getMountPoint(inMountPoint)
+	mountPoint, err := rootinit.GetMountPoint(inMountPoint)
 	if err != nil {
 		return nil, fmt.Errorf("get mount point error:\n%w", err)
 	}
 
-	srcDir, err := getMountPoint(inSrcDir)
+	srcDir, err := rootinit.GetMountPoint(inSrcDir)
 	if err != nil {
 		return nil, fmt.Errorf("get source directory error:\n%w", err)
 	}
@@ -1892,7 +1180,7 @@ func NewShadowRoot(inMountPoint, inSrcDir, cacheBaseDir string) (fs.InodeEmbedde
 		if err != nil {
 			return nil, fmt.Errorf("invalid cache directory: %w", err)
 		}
-		if err := validateCacheDirectory(baseCacheDir); err != nil {
+		if err := rootinit.ValidateCacheDirectory(baseCacheDir); err != nil {
 			return nil, fmt.Errorf("cache directory validation failed: %w", err)
 		}
 	} else {
@@ -1906,18 +1194,18 @@ func NewShadowRoot(inMountPoint, inSrcDir, cacheBaseDir string) (fs.InodeEmbedde
 
 	// create session directory if !exists
 	sessionPath := filepath.Join(baseCacheDir, mountID)
-	if err := createDir(sessionPath, 0755); err != nil {
+	if err := rootinit.CreateDir(sessionPath, 0755); err != nil {
 		return nil, fmt.Errorf("creating session directory error:\n%w", err)
 	}
 
 	cachePath := filepath.Join(sessionPath, RootName)
-	if err := createDir(cachePath, 0755); err != nil {
+	if err := rootinit.CreateDir(cachePath, 0755); err != nil {
 		return nil, fmt.Errorf("creating cache directory error:\n%w", err)
 	}
 
 	// create a file into the session directory indicating the target dir
 	targetFile := filepath.Join(sessionPath, ".target")
-	if err := writeFileOnce(targetFile, []byte(srcDir), 0444); err != nil {
+	if err := rootinit.WriteFileOnce(targetFile, []byte(srcDir), 0444); err != nil {
 		return nil, fmt.Errorf("creating target file error:\n%w", err)
 	}
 
@@ -1942,30 +1230,4 @@ func NewShadowRoot(inMountPoint, inSrcDir, cacheBaseDir string) (fs.InodeEmbedde
 	root.helpers = NewShadowNodeHelpers(root)
 
 	return root, nil
-}
-
-func getMountPoint(mountPoint string) (string, error) {
-	mountPoint = filepath.Clean(mountPoint)
-	if !filepath.IsAbs(mountPoint) {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return "", err
-		}
-		mountPoint = filepath.Clean(filepath.Join(cwd, mountPoint))
-	}
-
-	// check if mountPoint exists and is a directory
-	stat, err := os.Stat(mountPoint)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", fmt.Errorf("mount point does not exist:\n%w", err)
-		}
-		return "", fmt.Errorf("stat error:\n%w", err)
-	}
-
-	if !stat.IsDir() {
-		return "", fmt.Errorf("mount point(%s) must be a directory", mountPoint)
-	}
-
-	return mountPoint, nil
 }

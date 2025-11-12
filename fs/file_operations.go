@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
+
+	"github.com/pleclech/shadowfs/fs/xattr"
 )
 
 // FileOperation defines the interface for file operations
@@ -281,22 +283,22 @@ func (fo *FileOperationImpl) RemoveXattr(name string) syscall.Errno {
 
 // IsDeleted checks if the file is marked as deleted
 func (fo *FileOperationImpl) IsDeleted() (bool, syscall.Errno) {
-	xattr := ShadowXAttr{}
-	exists, errno := GetShadowXAttr(fo.GetCachePath(), &xattr)
+	attr := xattr.XAttr{}
+	exists, errno := xattr.Get(fo.GetCachePath(), &attr)
 	if errno != 0 {
 		return false, errno
 	}
-	return exists && IsPathDeleted(xattr), 0
+	return exists && xattr.IsPathDeleted(attr), 0
 }
 
 // MarkDeleted marks the file as deleted
 func (fo *FileOperationImpl) MarkDeleted() syscall.Errno {
-	xattr := ShadowXAttr{ShadowPathStatus: ShadowPathStatusDeleted}
-	return SetShadowXAttr(fo.GetCachePath(), &xattr)
+	attr := xattr.XAttr{PathStatus: xattr.PathStatusDeleted}
+	return xattr.Set(fo.GetCachePath(), &attr)
 }
 
 // MarkNormal marks the file as normal (not deleted)
 func (fo *FileOperationImpl) MarkNormal() syscall.Errno {
-	xattr := ShadowXAttr{ShadowPathStatus: ShadowPathStatusNone}
-	return SetShadowXAttr(fo.GetCachePath(), &xattr)
+	attr := xattr.XAttr{PathStatus: xattr.PathStatusNone}
+	return xattr.Set(fo.GetCachePath(), &attr)
 }

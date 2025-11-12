@@ -12,6 +12,8 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+
+	"github.com/pleclech/shadowfs/fs/xattr"
 )
 
 // TestSetup provides common test infrastructure
@@ -124,10 +126,10 @@ func (ts *TestSetup) AssertFileContent(path, expectedContent string) {
 }
 
 // AssertXAttr checks extended attribute
-func (ts *TestSetup) AssertXAttr(path string, expectedAttr ShadowXAttr) {
+func (ts *TestSetup) AssertXAttr(path string, expectedAttr xattr.XAttr) {
 	fullPath := filepath.Join(ts.CacheDir, path)
-	var attr ShadowXAttr
-	exists, errno := GetShadowXAttr(fullPath, &attr)
+	var attr xattr.XAttr
+	exists, errno := xattr.Get(fullPath, &attr)
 	if errno != 0 {
 		ts.T.Fatalf("Failed to get xattr for %s: %v", fullPath, errno)
 	}
@@ -135,9 +137,9 @@ func (ts *TestSetup) AssertXAttr(path string, expectedAttr ShadowXAttr) {
 		ts.T.Errorf("Expected xattr to exist for %s", fullPath)
 		return
 	}
-	if attr.ShadowPathStatus != expectedAttr.ShadowPathStatus {
+	if attr.PathStatus != expectedAttr.PathStatus {
 		ts.T.Errorf("XAttr status mismatch for %s. Expected: %v, Got: %v",
-			fullPath, expectedAttr.ShadowPathStatus, attr.ShadowPathStatus)
+			fullPath, expectedAttr.PathStatus, attr.PathStatus)
 	}
 }
 

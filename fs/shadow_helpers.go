@@ -7,6 +7,9 @@ import (
 	"syscall"
 
 	"github.com/hanwen/go-fuse/v2/fs"
+
+	"github.com/pleclech/shadowfs/fs/utils"
+	"github.com/pleclech/shadowfs/fs/xattr"
 )
 
 // ShadowNodeHelpers provides helper methods for ShadowNode operations
@@ -54,12 +57,12 @@ func (h *ShadowNodeHelpers) StatFile(path string, followSymlinks bool) (*syscall
 
 // CheckFileDeleted checks if a file is marked as deleted using xattr
 func (h *ShadowNodeHelpers) CheckFileDeleted(path string) (bool, syscall.Errno) {
-	xattr := ShadowXAttr{}
-	exists, errno := GetShadowXAttr(path, &xattr)
+	attr := xattr.XAttr{}
+	exists, errno := xattr.Get(path, &attr)
 	if errno != 0 {
 		return false, errno
 	}
-	return exists && IsPathDeleted(xattr), 0
+	return exists && xattr.IsPathDeleted(attr), 0
 }
 
 // CreateMirroredDir creates a directory in the cache with proper error handling
@@ -73,7 +76,7 @@ func (h *ShadowNodeHelpers) CreateMirroredDir(path string) (string, syscall.Errn
 			return "", fs.ToErrno(err)
 		}
 		// Ensure parent directories have proper permissions
-		if err := ensureDirPermissions(parentDir); err != nil {
+		if err := utils.EnsureDirPermissions(parentDir); err != nil {
 			return "", fs.ToErrno(err)
 		}
 	}
@@ -85,7 +88,7 @@ func (h *ShadowNodeHelpers) CreateMirroredDir(path string) (string, syscall.Errn
 	}
 
 	// Ensure directory has proper permissions (especially if it already existed)
-	if err := ensureDirPermissions(cachePath); err != nil {
+	if err := utils.EnsureDirPermissions(cachePath); err != nil {
 		return "", fs.ToErrno(err)
 	}
 

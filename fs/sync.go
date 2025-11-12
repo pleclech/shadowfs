@@ -10,6 +10,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/pleclech/shadowfs/fs/xattr"
 )
 
 // SyncOptions contains options for sync operation
@@ -371,14 +373,14 @@ func getFilesToSync(cachePath, sourcePath, filePath, dirPath string) ([]string, 
 		}
 
 		// Check if file is marked as deleted
-		var xattr ShadowXAttr
-		exists, errno := GetShadowXAttr(path, &xattr)
+		var attr xattr.XAttr
+		exists, errno := xattr.Get(path, &attr)
 		if errno != 0 && errno != syscall.ENODATA {
 			// Error reading xattr, but continue
 			exists = false
 		}
 
-		if exists && IsPathDeleted(xattr) {
+		if exists && xattr.IsPathDeleted(attr) {
 			// File is marked as deleted in cache
 			deletedFiles = append(deletedFiles, relPath)
 			return nil

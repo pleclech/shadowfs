@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/pleclech/shadowfs/fs/xattr"
 )
 
 func TestShadowNode_PathRebasing(t *testing.T) {
@@ -139,22 +141,22 @@ func TestShadowNode_FileOperations(t *testing.T) {
 	}
 
 	// Test deletion tracking
-	attr := ShadowXAttr{ShadowPathStatus: ShadowPathStatusDeleted}
-	errno := SetShadowXAttr(cachedFile, &attr)
+	attr := xattr.XAttr{PathStatus: xattr.PathStatusDeleted}
+	errno := xattr.Set(cachedFile, &attr)
 	if errno != 0 {
 		t.Errorf("SetShadowXAttr() failed: %v", errno)
 	}
 
 	// Verify file is marked as deleted
-	var retrievedAttr ShadowXAttr
-	exists, errno := GetShadowXAttr(cachedFile, &retrievedAttr)
+	var retrievedAttr xattr.XAttr
+	exists, errno := xattr.Get(cachedFile, &retrievedAttr)
 	if errno != 0 {
 		t.Errorf("GetShadowXAttr() failed: %v", errno)
 	}
 	if !exists {
 		t.Error("Expected xattr to exist")
 	}
-	if !IsPathDeleted(retrievedAttr) {
+	if !xattr.IsPathDeleted(retrievedAttr) {
 		t.Error("Expected file to be marked as deleted")
 	}
 }
@@ -231,8 +233,8 @@ func TestShadowNode_ErrorHandling(t *testing.T) {
 
 	// Test xattr operations on non-existent files
 	nonExistentCache := filepath.Join(ts.CacheDir, "nonexistent.txt")
-	var attr ShadowXAttr
-	exists, errno := GetShadowXAttr(nonExistentCache, &attr)
+	var attr xattr.XAttr
+	exists, errno := xattr.Get(nonExistentCache, &attr)
 	if errno != 0 {
 		t.Errorf("GetShadowXAttr() on non-existent file should not error: %v", errno)
 	}

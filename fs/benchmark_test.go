@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/hanwen/go-fuse/v2/fs"
+
+	"github.com/pleclech/shadowfs/fs/xattr"
 )
 
 // BenchmarkPathRebasing compares old vs new path rebasing performance
@@ -175,17 +177,17 @@ func BenchmarkXattrOperations(b *testing.B) {
 	}
 
 	// Set initial xattr
-	xattr := ShadowXAttr{ShadowPathStatus: ShadowPathStatusNone}
-	if errno := SetShadowXAttr(testFile, &xattr); errno != 0 {
+	attr := xattr.XAttr{PathStatus: xattr.PathStatusNone}
+	if errno := xattr.Set(testFile, &attr); errno != 0 {
 		b.Fatal("Failed to set initial xattr")
 	}
 
 	b.Run("Original", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			xattr := ShadowXAttr{}
-			exists, errno := GetShadowXAttr(testFile, &xattr)
+			attr := xattr.XAttr{}
+			exists, errno := xattr.Get(testFile, &attr)
 			if errno == 0 && exists {
-				_ = IsPathDeleted(xattr)
+				_ = xattr.IsPathDeleted(attr)
 			}
 		}
 	})

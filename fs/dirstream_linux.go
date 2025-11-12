@@ -15,6 +15,8 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+
+	"github.com/pleclech/shadowfs/fs/xattr"
 )
 
 type step int
@@ -52,9 +54,9 @@ func NewShadowDirStream(root *ShadowNode, originPath string) (fs.DirStream, sysc
 	cachePath := root.RebasePathUsingCache(originPath)
 
 	// check if the directory is not deleted in cache
-	xattr := ShadowXAttr{}
-	GetShadowXAttr(cachePath, &xattr)
-	if IsPathDeleted(xattr) {
+	attr := xattr.XAttr{}
+	xattr.Get(cachePath, &attr)
+	if xattr.IsPathDeleted(attr) {
 		// directory is deleted
 		return nil, syscall.ENOENT
 	}
@@ -211,9 +213,9 @@ func (ds *ShadowDirStream) processOriginEntries() bool {
 // isDeleted checks if a file/directory is marked as deleted in cache
 func (ds *ShadowDirStream) isDeleted(name string) bool {
 	fullPath := filepath.Join(ds.cachePath, name)
-	xattr := ShadowXAttr{}
-	exists, errno := GetShadowXAttr(fullPath, &xattr)
-	return errno == 0 && exists && IsPathDeleted(xattr)
+	attr := xattr.XAttr{}
+	exists, errno := xattr.Get(fullPath, &attr)
+	return errno == 0 && exists && xattr.IsPathDeleted(attr)
 }
 
 // Like syscall.Dirent, but without the [256]byte name.

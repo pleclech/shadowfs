@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/pleclech/shadowfs/fs/rootinit"
+	"github.com/pleclech/shadowfs/fs/xattr"
 )
 
 func TestRebasePathUsingCache(t *testing.T) {
@@ -93,27 +96,27 @@ func TestShadowXAttrOperations(t *testing.T) {
 	}
 
 	// Test setting and getting xattr
-	attr := ShadowXAttr{ShadowPathStatus: ShadowPathStatusDeleted}
-	errno := SetShadowXAttr(testFile, &attr)
+	attr := xattr.XAttr{PathStatus: xattr.PathStatusDeleted}
+	errno := xattr.Set(testFile, &attr)
 	if errno != 0 {
 		t.Errorf("SetShadowXAttr() failed: %v", errno)
 	}
 
 	// Test getting xattr
-	var retrievedAttr ShadowXAttr
-	exists, errno := GetShadowXAttr(testFile, &retrievedAttr)
+	var retrievedAttr xattr.XAttr
+	exists, errno := xattr.Get(testFile, &retrievedAttr)
 	if errno != 0 {
 		t.Errorf("GetShadowXAttr() failed: %v", errno)
 	}
 	if !exists {
 		t.Error("Expected xattr to exist")
 	}
-	if retrievedAttr.ShadowPathStatus != ShadowPathStatusDeleted {
-		t.Errorf("Expected ShadowPathStatusDeleted, got %v", retrievedAttr.ShadowPathStatus)
+	if retrievedAttr.PathStatus != xattr.PathStatusDeleted {
+		t.Errorf("Expected PathStatusDeleted, got %v", retrievedAttr.PathStatus)
 	}
 
 	// Test IsPathDeleted
-	if !IsPathDeleted(retrievedAttr) {
+	if !xattr.IsPathDeleted(retrievedAttr) {
 		t.Error("Expected path to be marked as deleted")
 	}
 }
@@ -123,8 +126,8 @@ func TestShadowXAttrOperations_NonExistentFile(t *testing.T) {
 	defer ts.Cleanup()
 
 	nonExistentFile := filepath.Join(ts.CacheDir, "nonexistent.txt")
-	var attr ShadowXAttr
-	exists, errno := GetShadowXAttr(nonExistentFile, &attr)
+	var attr xattr.XAttr
+	exists, errno := xattr.Get(nonExistentFile, &attr)
 
 	if errno != 0 {
 		t.Errorf("GetShadowXAttr() on non-existent file should not error: %v", errno)
@@ -221,7 +224,7 @@ func TestCreateDir(t *testing.T) {
 	testDir := filepath.Join(tempDir, "testdir")
 
 	// Test creating new directory
-	err := createDir(testDir, 0755)
+		err := rootinit.CreateDir(testDir, 0755)
 	if err != nil {
 		t.Errorf("createDir() failed: %v", err)
 	}
@@ -234,7 +237,7 @@ func TestCreateDir(t *testing.T) {
 	}
 
 	// Test creating existing directory (should not error)
-	err = createDir(testDir, 0755)
+	err = rootinit.CreateDir(testDir, 0755)
 	if err != nil {
 		t.Errorf("createDir() on existing directory failed: %v", err)
 	}
@@ -250,7 +253,7 @@ func TestCreateDir_FileExists(t *testing.T) {
 	}
 
 	// Try to create directory with same name
-	err := createDir(testFile, 0755)
+	err := rootinit.CreateDir(testFile, 0755)
 	if err == nil {
 		t.Error("Expected error when creating directory where file exists")
 	}
@@ -262,7 +265,7 @@ func TestWriteFileOnce(t *testing.T) {
 	content := []byte("test content")
 
 	// Test writing new file
-	err := writeFileOnce(testFile, content, 0644)
+		err := rootinit.WriteFileOnce(testFile, content, 0644)
 	if err != nil {
 		t.Errorf("writeFileOnce() failed: %v", err)
 	}
@@ -277,7 +280,7 @@ func TestWriteFileOnce(t *testing.T) {
 	}
 
 	// Test writing existing file (should not error)
-	err = writeFileOnce(testFile, []byte("new content"), 0644)
+	err = rootinit.WriteFileOnce(testFile, []byte("new content"), 0644)
 	if err != nil {
 		t.Errorf("writeFileOnce() on existing file failed: %v", err)
 	}
@@ -302,7 +305,7 @@ func TestWriteFileOnce_DirectoryExists(t *testing.T) {
 	}
 
 	// Try to write file with same name
-	err := writeFileOnce(testDir, []byte("test"), 0644)
+	err := rootinit.WriteFileOnce(testDir, []byte("test"), 0644)
 	if err == nil {
 		t.Error("Expected error when writing file where directory exists")
 	}
@@ -312,7 +315,7 @@ func TestGetMountPoint(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// Test absolute path
-	result, err := getMountPoint(tempDir)
+	result, err := rootinit.GetMountPoint(tempDir)
 	if err != nil {
 		t.Errorf("getMountPoint() failed: %v", err)
 	}
@@ -322,7 +325,7 @@ func TestGetMountPoint(t *testing.T) {
 
 	// Test non-existent path
 	nonExistent := filepath.Join(tempDir, "nonexistent")
-	_, err = getMountPoint(nonExistent)
+	_, err = rootinit.GetMountPoint(nonExistent)
 	if err == nil {
 		t.Error("Expected error for non-existent path")
 	}
@@ -332,7 +335,7 @@ func TestGetMountPoint(t *testing.T) {
 	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
-	_, err = getMountPoint(testFile)
+	_, err = rootinit.GetMountPoint(testFile)
 	if err == nil {
 		t.Error("Expected error for file path")
 	}
@@ -412,7 +415,7 @@ func TestValidateCacheDirectory(t *testing.T) {
 
 	// Test non-existent directory (should be created)
 	nonExistent := filepath.Join(tempDir, "new-cache")
-	err := validateCacheDirectory(nonExistent)
+		err := rootinit.ValidateCacheDirectory(nonExistent)
 	if err != nil {
 		t.Errorf("validateCacheDirectory() failed for non-existent dir: %v", err)
 	}
@@ -421,7 +424,7 @@ func TestValidateCacheDirectory(t *testing.T) {
 	}
 
 	// Test existing directory
-	err = validateCacheDirectory(tempDir)
+	err = rootinit.ValidateCacheDirectory(tempDir)
 	if err != nil {
 		t.Errorf("validateCacheDirectory() failed for existing dir: %v", err)
 	}
@@ -431,14 +434,14 @@ func TestValidateCacheDirectory(t *testing.T) {
 	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
-	err = validateCacheDirectory(testFile)
+	err = rootinit.ValidateCacheDirectory(testFile)
 	if err == nil {
 		t.Error("validateCacheDirectory() should fail for file")
 	}
 
 	// Test relative path (should be normalized)
 	relPath := "relative-cache"
-	err = validateCacheDirectory(relPath)
+	err = rootinit.ValidateCacheDirectory(relPath)
 	if err != nil {
 		t.Errorf("validateCacheDirectory() failed for relative path: %v", err)
 	}
