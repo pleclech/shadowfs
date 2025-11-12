@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -604,6 +605,166 @@ func TestFilesystem_GitOperations(t *testing.T) {
 	gitCmd.Env = append(os.Environ(), "GIT_DISCOVERY_ACROSS_FILESYSTEM=1")
 	if output, err := gitCmd.CombinedOutput(); err != nil {
 		t.Fatalf("Git commit failed: %v\nOutput: %s", err, string(output))
+	}
+}
+
+func TestFilesystem_GitAutoCommitPathConversion(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	// Build binary
+	if err := exec.Command("go", "build", "-o", testBinary, "./cmd/shadowfs").Run(); err != nil {
+		t.Fatalf("Failed to build binary: %v", err)
+	}
+	defer os.Remove(testBinary)
+
+	mountPoint := t.TempDir()
+	srcDir := t.TempDir()
+
+	// Start filesystem with git auto-commit enabled
+	// Use short timeouts for testing
+	cmd := exec.Command(testBinary, "-auto-git", "-git-idle-timeout", "1s", "-git-safety-window", "500ms", mountPoint, srcDir)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Failed to start filesystem: %v", err)
+	}
+	defer func() {
+		gracefulShutdown(cmd, mountPoint, t)
+	}()
+
+	// Wait for filesystem to be ready
+	time.Sleep(100 * time.Millisecond)
+
+	// Create a test file in mount point (this will trigger HandleWriteActivity with cache path)
+	testFile := filepath.Join(mountPoint, "foo.txt")
+	if err := os.WriteFile(testFile, []byte("test content"), 0644); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Wait for auto-commit to happen (idle timeout + safety window + some buffer)
+	time.Sleep(2 * time.Second)
+
+	// Verify git repository was created
+	gitDir := filepath.Join(mountPoint, ".gitofs")
+	if stat, err := os.Stat(gitDir); err != nil || !stat.IsDir() {
+		t.Fatalf("Git repository not created: %v", err)
+	}
+
+	// Verify file was committed (check git log)
+	gitCmd := exec.Command("git", "--git-dir", gitDir, "-C", mountPoint, "log", "--oneline")
+	output, err := gitCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Failed to run git log: %v, output: %s", err, string(output))
+	}
+
+	// Should have at least one commit
+	if len(output) == 0 {
+		t.Error("Expected git log to show commits, but got empty output")
+	}
+
+	// Verify the file path in git is correct (should be relative to mount point, not cache)
+	gitCmd = exec.Command("git", "--git-dir", gitDir, "-C", mountPoint, "ls-files")
+	output, err = gitCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Failed to run git ls-files: %v, output: %s", err, string(output))
+	}
+
+	// The file should be tracked as "foo.txt" (relative to mount point), not a cache path
+	outputStr := string(output)
+	if !strings.Contains(outputStr, "foo.txt") {
+		t.Errorf("Expected 'foo.txt' in git ls-files output, got: %s", outputStr)
+	}
+
+	// Verify no cache paths are in git (should not contain .shadowfs)
+	if strings.Contains(outputStr, ".shadowfs") {
+		t.Errorf("Git should not contain cache paths, got: %s", outputStr)
+	}
+}
+
+func TestFilesystem_AppendOperation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	// Build binary
+	if err := exec.Command("go", "build", "-o", testBinary, "./cmd/shadowfs").Run(); err != nil {
+		t.Fatalf("Failed to build binary: %v", err)
+	}
+	defer os.Remove(testBinary)
+
+	mountPoint := t.TempDir()
+	srcDir := t.TempDir()
+
+	// Create a file in source directory with initial content
+	testFile := filepath.Join(srcDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
+		t.Fatalf("Failed to create source file: %v", err)
+	}
+
+	// Start filesystem
+	cmd := exec.Command(testBinary, mountPoint, srcDir)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Failed to start filesystem: %v", err)
+	}
+	defer func() {
+		gracefulShutdown(cmd, mountPoint, t)
+	}()
+
+	// Wait for filesystem to be ready
+	time.Sleep(100 * time.Millisecond)
+
+	mountedFile := filepath.Join(mountPoint, "test.txt")
+
+	// Verify initial content
+	content, err := os.ReadFile(mountedFile)
+	if err != nil {
+		t.Fatalf("Failed to read file: %v", err)
+	}
+	if string(content) != "test" {
+		t.Errorf("Expected initial content 'test', got '%s'", string(content))
+	}
+
+	// Append content to file (first append - this is where the bug occurred)
+	// Use os.OpenFile with O_APPEND to simulate echo "bar" >> test.txt
+	f, err := os.OpenFile(mountedFile, os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		t.Fatalf("Failed to open file for append: %v", err)
+	}
+	if _, err := f.WriteString("bar"); err != nil {
+		f.Close()
+		t.Fatalf("Failed to append to file: %v", err)
+	}
+	f.Close()
+
+	// Verify content after first append
+	content, err = os.ReadFile(mountedFile)
+	if err != nil {
+		t.Fatalf("Failed to read file after append: %v", err)
+	}
+	expected := "testbar"
+	if string(content) != expected {
+		t.Errorf("After first append: expected '%s', got '%s'", expected, string(content))
+	}
+
+	// Append again (second append - should work correctly)
+	f, err = os.OpenFile(mountedFile, os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		t.Fatalf("Failed to open file for second append: %v", err)
+	}
+	if _, err := f.WriteString("baz"); err != nil {
+		f.Close()
+		t.Fatalf("Failed to append to file second time: %v", err)
+	}
+	f.Close()
+
+	// Verify content after second append
+	content, err = os.ReadFile(mountedFile)
+	if err != nil {
+		t.Fatalf("Failed to read file after second append: %v", err)
+	}
+	expected = "testbarbaz"
+	if string(content) != expected {
+		t.Errorf("After second append: expected '%s', got '%s'", expected, string(content))
 	}
 }
 

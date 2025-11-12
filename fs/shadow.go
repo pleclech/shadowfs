@@ -64,8 +64,16 @@ func (n *ShadowNode) HandleWriteActivity(filePath string) {
 		return
 	}
 
+	// Convert cache paths to mount point paths for git operations
+	// Git operations expect paths relative to the mount point (workspace)
+	mountPointPath := filePath
+	if strings.HasPrefix(filePath, n.cachePath) {
+		// Path is in cache - convert to mount point path
+		mountPointPath = n.RebasePathUsingMountPoint(filePath)
+	}
+
 	if n.activityTracker != nil {
-		n.activityTracker.MarkActivity(filePath)
+		n.activityTracker.MarkActivity(mountPointPath)
 	}
 }
 
@@ -573,7 +581,8 @@ func (n *ShadowNode) Create(ctx context.Context, name string, flags uint32, mode
 	// Create empty file - content will be copied on first write
 	mode = fileMode // Use source permissions if available
 
-	flags = flags &^ syscall.O_APPEND
+	// Preserve O_APPEND flag - kernel handles append semantics correctly
+	// Don't strip it here as we need it for proper append behavior
 
 	fd, err := syscall.Open(p, int(flags)|os.O_CREATE, mode)
 	if err != nil {
@@ -628,8 +637,11 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 	p := n.FullPath(true)
 
 	forceCache := flags&(syscall.O_WRONLY|syscall.O_RDWR|syscall.O_TRUNC|syscall.O_APPEND|syscall.O_CREAT) != 0
-	flags = flags &^ (syscall.O_APPEND | syscall.O_TRUNC)
-	Debug("Open: forceCache=%v", forceCache)
+	hasAppend := flags&syscall.O_APPEND != 0
+	// Preserve O_APPEND flag - kernel handles append semantics correctly
+	// Only strip O_TRUNC to prevent truncation when we want to preserve content
+	flags = flags &^ syscall.O_TRUNC
+	Debug("Open: forceCache=%v, hasAppend=%v", forceCache, hasAppend)
 
 	perms := uint32(0)
 
@@ -656,6 +668,22 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 		err := syscall.Lstat(cachedPath, &st)
 		if err == nil {
 			// File exists in cache - use it
+			// But if opening with O_APPEND and cache file is empty, copy source content first
+			if hasAppend && st.Size == 0 {
+				var sourceSt syscall.Stat_t
+				if err := syscall.Lstat(p, &sourceSt); err == nil && sourceSt.Size > 0 {
+					// Source file exists and has content - copy it to cache before opening for append
+					if n.helpers != nil {
+						if errno := n.helpers.CopyFile(p, cachedPath); errno != 0 {
+							return nil, 0, errno
+						}
+					} else {
+						if errno := n.copyFileSimple(p, cachedPath, uint32(sourceSt.Mode)); errno != 0 {
+							return nil, 0, errno
+						}
+					}
+				}
+			}
 			p = cachedPath
 			n.mirrorPath = cachedPath
 		} else if forceCache {
@@ -665,7 +693,6 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 			if err != nil {
 				return nil, 0, fs.ToErrno(err)
 			}
-			// Create empty file in cache - copy-on-write will happen on first write
 			// get permissions from source file if it exists (only needed for write operations)
 			err = syscall.Lstat(p, &st)
 			if err == nil {
@@ -673,10 +700,37 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 			} else {
 				perms = 0644 // default file permissions
 			}
-			// set flags to create file
-			flags = flags | syscall.O_CREAT
-			p = cachedPath
-			n.mirrorPath = cachedPath
+
+			// Copy-on-write for append operations: if opening with O_APPEND and source has content,
+			// copy source content to cache before opening to preserve existing content
+			if hasAppend {
+				var sourceSt syscall.Stat_t
+				if err := syscall.Lstat(p, &sourceSt); err == nil && sourceSt.Size > 0 {
+					// Source file exists and has content - copy it to cache before opening for append
+					if n.helpers != nil {
+						if errno := n.helpers.CopyFile(p, cachedPath); errno != 0 {
+							return nil, 0, errno
+						}
+					} else {
+						if errno := n.copyFileSimple(p, cachedPath, uint32(sourceSt.Mode)); errno != 0 {
+							return nil, 0, errno
+						}
+					}
+					// File already exists in cache now, don't need O_CREAT
+					p = cachedPath
+					n.mirrorPath = cachedPath
+				} else {
+					// Source doesn't exist or is empty - create empty file in cache
+					flags = flags | syscall.O_CREAT
+					p = cachedPath
+					n.mirrorPath = cachedPath
+				}
+			} else {
+				// Not append mode - create empty file in cache, copy-on-write will happen on first write
+				flags = flags | syscall.O_CREAT
+				p = cachedPath
+				n.mirrorPath = cachedPath
+			}
 		} else {
 			// Read-only: use source file directly (no copy needed, no permission check needed)
 			// p already points to source path
@@ -685,7 +739,26 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 		// check if file exists in cache
 		st := syscall.Stat_t{}
 		err := syscall.Lstat(p, &st)
-		if err != nil {
+		if err == nil {
+			// File exists in cache
+			// But if opening with O_APPEND and cache file is empty, copy source content first
+			if hasAppend && st.Size == 0 {
+				sourcePath := n.RebasePathUsingSrc(p)
+				var sourceSt syscall.Stat_t
+				if err := syscall.Lstat(sourcePath, &sourceSt); err == nil && sourceSt.Size > 0 {
+					// Source file exists and has content - copy it to cache before opening for append
+					if n.helpers != nil {
+						if errno := n.helpers.CopyFile(sourcePath, p); errno != 0 {
+							return nil, 0, errno
+						}
+					} else {
+						if errno := n.copyFileSimple(sourcePath, p, uint32(sourceSt.Mode)); errno != 0 {
+							return nil, 0, errno
+						}
+					}
+				}
+			}
+		} else {
 			// CRITICAL: File doesn't exist at current mirrorPath
 			// This can happen after rename operations where mirrorPath is stale
 			// Try to find the file in cache using relative path
