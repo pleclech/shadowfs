@@ -567,18 +567,22 @@ func TestFilesystem_GitOperations(t *testing.T) {
 	}
 
 	// Check contents of HEAD file
-	headContent, err := os.ReadFile(headPath)
+	_, err := os.ReadFile(headPath)
 	if err != nil {
 		t.Fatalf("Failed to read .git/HEAD: %v", err)
 	}
-	t.Logf(".git/HEAD content: %q", string(headContent))
 
 	// Check contents of config file
-	configContent, err := os.ReadFile(configPath)
+	_, err = os.ReadFile(configPath)
 	if err != nil {
 		t.Fatalf("Failed to read .git/config: %v", err)
 	}
-	t.Logf(".git/config content: %q", string(configContent))
+
+	// Debug: list all files in .git directory
+	if _, err := os.ReadDir(gitDir); err == nil {
+	} else {
+		t.Logf("Failed to read .git directory: %v", err)
+	}
 
 	// Test creating a file and adding it
 	gitTestFile := filepath.Join(mountPoint, "test.txt")
@@ -653,7 +657,6 @@ func TestVersionList_WithPattern(t *testing.T) {
 	versionCmd := exec.Command(testBinary, "version", "list", "--mount-point", mountPoint, "--path", "file1.txt")
 	output, err := versionCmd.CombinedOutput()
 	if err != nil {
-		t.Logf("Version list output: %s", string(output))
 		// Don't fail if no commits yet - Git might not have committed yet
 		if len(output) == 0 {
 			t.Skip("No commits found yet, skipping pattern test")
@@ -721,7 +724,6 @@ func TestVersionDiff_WithPattern(t *testing.T) {
 	versionCmd := exec.Command(testBinary, "version", "diff", "--mount-point", mountPoint, "HEAD~1", "HEAD", "--path", "*.txt")
 	output, err := versionCmd.CombinedOutput()
 	if err != nil {
-		t.Logf("Version diff output: %s", string(output))
 		// Don't fail if not enough commits
 		if len(output) == 0 {
 			t.Skip("Not enough commits for diff test")
@@ -782,5 +784,240 @@ func TestVersionLog_WithPattern(t *testing.T) {
 		if len(output) == 0 {
 			t.Skip("No commits found yet, skipping log pattern test")
 		}
+	}
+}
+
+func TestSecurity_RenameVulnerability(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	// Build binary
+	if err := exec.Command("go", "build", "-o", testBinary, "./cmd/shadowfs").Run(); err != nil {
+		t.Fatalf("Failed to build binary: %v", err)
+	}
+	defer os.Remove(testBinary)
+
+	mountPoint := t.TempDir()
+	srcDir := t.TempDir()
+
+	// Create a test file in source
+	srcFooFile := filepath.Join(srcDir, "foo.txt")
+	if err := os.WriteFile(srcFooFile, []byte("test content"), 0644); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Create an existing directory in source (this is the key to the vulnerability)
+	srcFooDir := filepath.Join(srcDir, "foo")
+	if err := os.Mkdir(srcFooDir, 0755); err != nil {
+		t.Fatalf("Failed to create existing directory: %v", err)
+	}
+
+	// Start filesystem
+	cmd := exec.Command(testBinary, mountPoint, srcDir)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Failed to start filesystem: %v", err)
+	}
+	defer func() {
+		gracefulShutdown(cmd, mountPoint, t)
+	}()
+
+	// Wait for filesystem to be ready
+	time.Sleep(100 * time.Millisecond)
+
+	mountFooFile := filepath.Join(mountPoint, "foo.txt")
+	mountFooDir := filepath.Join(mountPoint, "foo")
+
+	// Verify initial state - both file and directory should exist in mount
+	if _, err := os.Stat(mountFooFile); os.IsNotExist(err) {
+		t.Fatal("Test file not found in mount point")
+	}
+
+	if stat, err := os.Stat(mountFooDir); err != nil {
+		t.Fatalf("Test directory not found in mount point: %v", err)
+	} else if !stat.IsDir() {
+		t.Fatal("Mount point 'foo' exists but is not a directory")
+	}
+
+	// Perform the rename operation that previously caused the CRITICAL security vulnerability
+	// This simulates: mv foo.txt foo (where foo is an existing directory)
+	// BEFORE FIX: This would replace the directory with the file, exposing filesystem boundaries
+	// AFTER FIX: This should move the file INTO the directory
+	mvCmd := exec.Command("mv", mountFooFile, mountFooDir)
+	mvCmd.Dir = mountPoint
+	out, err := mvCmd.CombinedOutput()
+	t.Logf("Rename operation output: %s", string(out))
+	if err != nil {
+		t.Logf("Rename operation warning: %v, output: %s", err, string(out))
+		// Don't fail - the mv might fail but we still want to check security
+	}
+
+	// Debug: Check inside the foo directory in mount point
+	fooDir := filepath.Join(mountPoint, "foo")
+	if _, err := os.ReadDir(fooDir); err == nil {
+	} else {
+		t.Logf("Could not read foo directory: %v", err)
+	}
+
+	// CRITICAL SECURITY CHECK: The directory should still exist and not be replaced
+	if stat, err := os.Stat(mountFooDir); err != nil {
+		t.Errorf("SECURITY VULNERABILITY: Directory 'foo' no longer exists after rename: %v", err)
+	} else if !stat.IsDir() {
+		t.Error("SECURITY VULNERABILITY: Directory 'foo' was replaced by a file")
+	}
+
+	// The file should now be inside the directory (correct behavior)
+	movedFile := filepath.Join(mountFooDir, "foo.txt")
+	if stat, err := os.Stat(movedFile); err != nil {
+		t.Errorf("File not found inside directory after rename: %v", err)
+	} else if stat.IsDir() {
+		t.Error("Moved path is a directory, expected a file")
+	}
+
+	// Ensure the source directory structure is still intact
+	if _, err := os.Stat(srcFooDir); err != nil {
+		t.Errorf("Source directory structure corrupted: %v", err)
+	}
+
+	if _, err := os.Stat(srcFooFile); err != nil {
+		// fail the test file shoud be still present in the source directory
+		t.Errorf("Test file not found in source directory: %v", err)
+	}
+
+	// The key security test: file should not be inside source directory
+	sourceMovedFile := filepath.Join(srcFooDir, "foo.txt")
+	if _, err := os.Stat(sourceMovedFile); err == nil {
+		t.Errorf("File present in source filesystem")
+	}
+}
+
+func TestSecurity_RenameComprehensive(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	// Build binary
+	if err := exec.Command("go", "build", "-o", testBinary, "./cmd/shadowfs").Run(); err != nil {
+		t.Fatalf("Failed to build binary: %v", err)
+	}
+	defer os.Remove(testBinary)
+
+	mountPoint := t.TempDir()
+	srcDir := t.TempDir()
+
+	// Create test files and directories in source
+	testFile1 := filepath.Join(srcDir, "file1.txt")
+	testFile2 := filepath.Join(srcDir, "file2.txt")
+	testDir1 := filepath.Join(srcDir, "dir1")
+	testDir2 := filepath.Join(srcDir, "dir2")
+
+	if err := os.WriteFile(testFile1, []byte("content1"), 0644); err != nil {
+		t.Fatalf("Failed to create test file 1: %v", err)
+	}
+	if err := os.WriteFile(testFile2, []byte("content2"), 0644); err != nil {
+		t.Fatalf("Failed to create test file 2: %v", err)
+	}
+	if err := os.Mkdir(testDir1, 0755); err != nil {
+		t.Fatalf("Failed to create test dir 1: %v", err)
+	}
+	if err := os.Mkdir(testDir2, 0755); err != nil {
+		t.Fatalf("Failed to create test dir 2: %v", err)
+	}
+
+	// Start filesystem with cache directory for better analysis
+	cacheDir := t.TempDir()
+	cmd := exec.Command(testBinary, "-cache-dir", cacheDir, mountPoint, srcDir)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Failed to start filesystem: %v", err)
+	}
+	defer func() {
+		gracefulShutdown(cmd, mountPoint, t)
+	}()
+
+	// Wait for filesystem to be ready
+	time.Sleep(100 * time.Millisecond)
+
+	// Test 1: Rename file to another file (should replace target file)
+	t.Log("Test 1: Rename file to another file")
+	mvCmd := exec.Command("mv", "file1.txt", "file2.txt")
+	mvCmd.Dir = mountPoint
+	if out, err := mvCmd.CombinedOutput(); err != nil {
+		t.Logf("File-to-file rename warning: %v, output: %s", err, string(out))
+	}
+
+	// Verify file1.txt is gone, file2.txt exists with content1
+	if _, err := os.Stat(filepath.Join(mountPoint, "file1.txt")); err == nil {
+		t.Error("Original file1.txt should be gone after rename")
+	}
+
+	if content, err := os.ReadFile(filepath.Join(mountPoint, "file2.txt")); err != nil {
+		t.Errorf("file2.txt should exist after rename: %v", err)
+	} else if string(content) != "content1" {
+		t.Errorf("file2.txt should have content1, got: %s", string(content))
+	}
+
+	// Test 2: Rename directory to another directory (should fail if target not empty)
+	t.Log("Test 2: Rename directory to another directory")
+	mvCmd = exec.Command("mv", "dir1", "dir2")
+	mvCmd.Dir = mountPoint
+	out, err := mvCmd.CombinedOutput()
+	if err != nil {
+		t.Logf("Dir-to-dir rename failed as expected: %v, output: %s", err, string(out))
+		// This is expected behavior - mv won't replace non-empty directories
+	} else {
+		t.Error("Directory-to-directory rename should fail when target is not empty")
+	}
+
+	// Both directories should still exist
+	if _, err := os.Stat(filepath.Join(mountPoint, "dir1")); err != nil {
+		t.Error("dir1 should still exist after failed rename")
+	}
+
+	if stat, err := os.Stat(filepath.Join(mountPoint, "dir2")); err != nil {
+		t.Errorf("dir2 should still exist after failed rename: %v", err)
+	} else if !stat.IsDir() {
+		t.Error("dir2 should still be a directory after failed rename")
+	}
+
+	// Test 3: Rename file to non-existent name (should work normally)
+	t.Log("Test 3: Rename file to non-existent name")
+	// First recreate file1.txt
+	if err := os.WriteFile(filepath.Join(mountPoint, "file1.txt"), []byte("new content"), 0644); err != nil {
+		t.Fatalf("Failed to recreate file1.txt: %v", err)
+	}
+
+	mvCmd = exec.Command("mv", "file1.txt", "newname.txt")
+	mvCmd.Dir = mountPoint
+	if out, err := mvCmd.CombinedOutput(); err != nil {
+		t.Fatalf("File to new name rename failed: %v, output: %s", err, string(out))
+	}
+
+	// Verify file1.txt is gone, newname.txt exists
+	if _, err := os.Stat(filepath.Join(mountPoint, "file1.txt")); err == nil {
+		t.Error("Original file1.txt should be gone after rename to newname")
+	}
+
+	if _, err := os.Stat(filepath.Join(mountPoint, "newname.txt")); err != nil {
+		t.Errorf("newname.txt should exist after rename: %v", err)
+	}
+
+	// Test 4: Rename directory to non-existent name (should work normally)
+	t.Log("Test 4: Rename directory to non-existent name")
+	// Use a different name since dir1 still exists from previous test
+	mvCmd = exec.Command("mv", "dir2", "newdir")
+	mvCmd.Dir = mountPoint
+	if out, err := mvCmd.CombinedOutput(); err != nil {
+		t.Fatalf("Dir to new name rename failed: %v, output: %s", err, string(out))
+	}
+
+	// Verify dir2 is gone, newdir exists
+	if _, err := os.Stat(filepath.Join(mountPoint, "dir2")); err == nil {
+		t.Error("Original dir2 should be gone after rename to newdir")
+	}
+
+	if stat, err := os.Stat(filepath.Join(mountPoint, "newdir")); err != nil {
+		t.Errorf("newdir should exist after rename: %v", err)
+	} else if !stat.IsDir() {
+		t.Error("newdir should be a directory after rename")
 	}
 }
