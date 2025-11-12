@@ -42,6 +42,7 @@ type MountStats struct {
 	FileCount       int
 	DirCount        int
 	GitEnabled      bool
+	GitRepoSize     int64
 	LastCommitHash  string
 	LastCommitTime  time.Time
 	LastCommitMsg   string
@@ -186,9 +187,13 @@ func getMountStatus(mountPoint string) (*MountStatus, error) {
 		// Get mount ID
 		mountID := cache.ComputeMountID(normalizedMountPoint, daemonInfo.SourceDir)
 
-		// Get cache directory
-		baseDir, _ := cache.GetCacheBaseDir()
-		cacheDir := cache.GetSessionPath(baseDir, mountID)
+		// Find actual cache directory (may differ if paths were normalized differently)
+		cacheDir, err := rootinit.FindCacheDirectory(normalizedMountPoint)
+		if err != nil {
+			// Fallback to computed path if FindCacheDirectory fails
+			baseDir, _ := cache.GetCacheBaseDir()
+			cacheDir = cache.GetSessionPath(baseDir, mountID)
+		}
 
 		return &MountStatus{
 			MountPoint: normalizedMountPoint,
@@ -263,22 +268,36 @@ func collectStats(mountPoint string) (*MountStats, error) {
 	var fileCount int
 	var dirCount int
 
-	err = filepath.Walk(cachePath, func(path string, info os.FileInfo, err error) error {
+	// Check if cache directory exists
+	if _, err := os.Stat(cachePath); err == nil {
+		// Walk the cache directory
+		err = filepath.Walk(cachePath, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil // Skip errors
+			}
+			// Skip the root directory itself
+			if path == cachePath {
+				return nil
+			}
+			// Skip .gitofs directory (Git repository metadata, not cached files)
+			relPath, err := filepath.Rel(cachePath, path)
+			if err == nil && (relPath == fs.GitofsName || strings.HasPrefix(relPath, fs.GitofsName+string(filepath.Separator))) {
+				return nil
+			}
+			if info.IsDir() {
+				dirCount++
+			} else {
+				fileCount++
+				cacheSize += info.Size()
+			}
+			return nil
+		})
 		if err != nil {
-			return nil // Skip errors
+			// Log but don't fail
+			log.Printf("Warning: failed to walk cache directory: %v", err)
 		}
-		if info.IsDir() {
-			dirCount++
-		} else {
-			fileCount++
-			cacheSize += info.Size()
-		}
-		return nil
-	})
-	if err != nil {
-		// Log but don't fail
-		log.Printf("Warning: failed to walk cache directory: %v", err)
 	}
+	// If directory doesn't exist, stats remain 0 (no files cached yet)
 
 	stats.CacheSize = cacheSize
 	stats.FileCount = fileCount
@@ -288,6 +307,24 @@ func collectStats(mountPoint string) (*MountStats, error) {
 	gitManager, err := fs.GetGitRepository(mountPoint)
 	if err == nil {
 		stats.GitEnabled = true
+
+		// Calculate Git repository size (.gitofs directory)
+		gitofsPath := filepath.Join(cachePath, fs.GitofsName)
+		if _, err := os.Stat(gitofsPath); err == nil {
+			var gitRepoSize int64
+			err = filepath.Walk(gitofsPath, func(path string, info os.FileInfo, err error) error {
+				if err != nil {
+					return nil // Skip errors
+				}
+				if !info.IsDir() {
+					gitRepoSize += info.Size()
+				}
+				return nil
+			})
+			if err == nil {
+				stats.GitRepoSize = gitRepoSize
+			}
+		}
 
 		// Get uncommitted files
 		uncommitted, err := gitManager.StatusPorcelain()
@@ -398,6 +435,9 @@ func runInfoCommand(args []string) {
 	if stats.GitEnabled {
 		fmt.Println("Git Status:")
 		fmt.Printf("  Enabled: Yes\n")
+		if stats.GitRepoSize > 0 {
+			fmt.Printf("  Repository Size: %s\n", formatSize(stats.GitRepoSize))
+		}
 		if stats.LastCommitHash != "" {
 			hashShort := stats.LastCommitHash
 			if len(hashShort) > 7 {

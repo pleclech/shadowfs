@@ -796,10 +796,8 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 
 	lf := fs.NewLoopbackFile(f)
 
-	// Track write activity for Git auto-versioning
-	if forceCache {
-		n.HandleWriteActivity(p)
-	}
+	// Note: Activity tracking happens in Write() method after actual writes occur
+	// Not tracking here to avoid premature tracking before copy-on-write completes
 
 	return lf, 0, 0
 }
