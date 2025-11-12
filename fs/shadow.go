@@ -1065,6 +1065,24 @@ func (n *ShadowNode) Rename(ctx context.Context, name string, newParent fs.Inode
 
 	p2 := filepath.Join(n.RootData.Path, newParent.EmbeddedInode().Path(nil), newName)
 
+	// CRITICAL SECURITY FIX: Check if destination is an existing directory
+	// If renaming a file to match an existing directory name, move file INTO directory
+	if newParentNode, ok := newParent.(*ShadowNode); ok {
+		if destChild := newParentNode.GetChild(newName); destChild != nil {
+			if destOps := destChild.EmbeddedInode().Operations(); destOps != nil {
+				if destNode, ok := destOps.(*ShadowNode); ok {
+					// Check if destination is a directory by looking at its mirrorPath
+					if destNode.mirrorPath != "" {
+						if stat, err := os.Stat(destNode.mirrorPath); err == nil && stat.IsDir() {
+							// Destination is a directory, move file inside it
+							p2 = filepath.Join(p2, name)
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// if p2 is in srcDir then change it to cache
 	if strings.HasPrefix(p2, n.srcDir) {
 		p2 = n.RebasePathUsingCache(p2)
@@ -1101,8 +1119,15 @@ func (n *ShadowNode) Rename(ctx context.Context, name string, newParent fs.Inode
 			if err != nil {
 				return fs.ToErrno(err)
 			}
-			// Update the mirrorPath to the new location
-			n.mirrorPath = p2
+			// CRITICAL SECURITY FIX: Update the actual file node's mirrorPath, not parent directory
+			// Find the child node being renamed and update its mirrorPath to the new location
+			if child := n.GetChild(name); child != nil {
+				if childOps := child.EmbeddedInode().Operations(); childOps != nil {
+					if childNode, ok := childOps.(*ShadowNode); ok {
+						childNode.mirrorPath = p2
+					}
+				}
+			}
 		}
 	} else {
 		// make a copy of the file at p2 destination
