@@ -38,9 +38,10 @@ func (n *ShadowNode) Mkdir(ctx context.Context, name string, mode uint32, out *f
 	// check if directory exists in src
 	st := syscall.Stat_t{}
 	err := syscall.Lstat(p, &st)
+	dirMode := mode // Use provided mode as default
 	if err == nil {
 		// directory exists in src use the same mode
-		mode = uint32(st.Mode)
+		dirMode = uint32(st.Mode)
 	}
 
 	// change path to cache
@@ -56,7 +57,7 @@ func (n *ShadowNode) Mkdir(ctx context.Context, name string, mode uint32, out *f
 		if errno == 0 && exists && xattr.IsPathDeleted(attr) {
 			// Path exists and is marked as deleted - remove it to allow directory creation
 			// Remove the xattr first
-			syscall.Removexattr(p, xattr.Name)
+			xattr.Remove(p)
 			// Remove the file
 			if err := syscall.Unlink(p); err != nil {
 				// If unlink fails, continue anyway - might be a directory already
@@ -76,16 +77,21 @@ func (n *ShadowNode) Mkdir(ctx context.Context, name string, mode uint32, out *f
 	}
 
 	// Ensure directories have execute permissions
-	// Temporarily disable umask to ensure 0755 permissions are set correctly
+	// Temporarily disable umask to ensure permissions are set correctly
 	// This is critical - umask can remove execute bits, making directories untraversable
 	oldUmask := syscall.Umask(0)
 	defer syscall.Umask(oldUmask)
 
-	// Always use 0755 for directories to ensure they're traversable
-	dirMode := os.FileMode(0755)
+	// Use the mode from src if available, otherwise use provided mode
+	// Ensure execute bits are set (0755) for directories to be traversable
+	fileMode := os.FileMode(dirMode)
+	if fileMode&0111 == 0 {
+		// Missing execute bits - ensure at least 0755
+		fileMode = os.FileMode(0755)
+	}
 
 	// Use os.Mkdir - it's simpler and handles mode correctly
-	err = os.Mkdir(p, dirMode)
+	err = os.Mkdir(p, fileMode)
 	if err != nil {
 		// Handle case where directory already exists (idempotent operation)
 		if os.IsExist(err) {

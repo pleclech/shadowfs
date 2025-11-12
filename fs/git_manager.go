@@ -197,31 +197,6 @@ func (gm *GitManager) configureGitUser() error {
 	return nil
 }
 
-// setupGitIgnore creates .gitignore to ignore source artifacts
-func (gm *GitManager) setupGitIgnore() error {
-	gitIgnorePath := filepath.Join(gm.workspacePath, ".gitignore")
-
-	content := `# Ignore overlay filesystem artifacts
-.shadowfs/
-
-# Ignore temporary files
-*.tmp
-*.swp
-*.bak
-*~
-
-# Ignore AI editor artifacts
-.ai-cache/
-.ai-temp/
-
-# Ignore OS files
-.DS_Store
-Thumbs.db
-`
-
-	return os.WriteFile(gitIgnorePath, []byte(content), 0644)
-}
-
 // AutoCommitFile stages and commits a file with automatic message (async, non-blocking)
 func (gm *GitManager) AutoCommitFile(filePath string, reason string) error {
 	if !gm.enabled {

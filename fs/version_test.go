@@ -364,7 +364,7 @@ func TestExpandGlobPatterns_EmptyPatterns(t *testing.T) {
 		t.Fatalf("ExpandGlobPatterns failed: %v", err)
 	}
 
-	if result != nil && len(result) != 0 {
+	if len(result) != 0 {
 		t.Errorf("Expected empty result, got %v", result)
 	}
 
@@ -374,7 +374,7 @@ func TestExpandGlobPatterns_EmptyPatterns(t *testing.T) {
 		t.Fatalf("ExpandGlobPatterns failed: %v", err)
 	}
 
-	if result != nil && len(result) != 0 {
+	if len(result) != 0 {
 		t.Errorf("Expected empty result for empty string pattern, got %v", result)
 	}
 }

@@ -1,11 +1,7 @@
 package xattr
 
 import (
-	"os"
-	"syscall"
 	"unsafe"
-
-	"github.com/hanwen/go-fuse/v2/fs"
 )
 
 const Name = "user.shadow-fs"
@@ -35,24 +31,14 @@ func FromBytes(data []byte) *XAttr {
 	return (*XAttr)(unsafe.Pointer(&data[0]))
 }
 
-func Get(path string, attr *XAttr) (exists bool, errno syscall.Errno) {
-	_, err := syscall.Getxattr(path, Name, ToBytes(attr))
+// Get and Set are implemented in platform-specific files:
+// - xattr_linux.go: Linux implementation using syscall.Getxattr/Setxattr
+// - xattr_other.go: Non-Linux stub implementation
 
-	// skip if xattr not found
-	if os.IsNotExist(err) {
-		return false, 0
-	}
-
-	if err != nil && err != syscall.ENODATA {
-		return false, fs.ToErrno(err)
-	}
-
-	return true, 0
-}
-
-func Set(path string, attr *XAttr) syscall.Errno {
-	return fs.ToErrno(syscall.Setxattr(path, Name, ToBytes(attr), 0))
-}
+// Remove removes an extended attribute from the given path
+// This is implemented in platform-specific files:
+// - xattr_linux.go: Linux implementation using syscall.Removexattr
+// - xattr_other.go: Non-Linux stub implementation
 
 func IsPathDeleted(attr XAttr) bool {
 	return attr.PathStatus&PathStatusDeleted != 0

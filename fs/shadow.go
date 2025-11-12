@@ -517,12 +517,6 @@ func (n *ShadowNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetA
 	return fs.OK
 }
 
-// preserveOwner sets uid and gid of `path` according to the caller information
-// in `ctx`.
-func (n *ShadowNode) preserveOwner(ctx context.Context, path string) error {
-	return utils.PreserveOwner(ctx, path)
-}
-
 // ensureDirPermissions ensures a directory has proper execute permissions.
 // It checks if the path is a directory and ensures it has at least 0755 permissions.
 // Always chmods to ensure kernel sees correct permissions immediately.
@@ -557,7 +551,7 @@ func (n *ShadowNode) Create(ctx context.Context, name string, flags uint32, mode
 			return nil, nil, 0, fs.ToErrno(err)
 		}
 		// Remove the xattr deletion marker
-		syscall.Removexattr(p, xattr.Name)
+		xattr.Remove(p)
 	}
 
 	// need to create file in cache

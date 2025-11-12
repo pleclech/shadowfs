@@ -236,50 +236,9 @@ func (fo *FileOperationImpl) CopyTo(destPath string) syscall.Errno {
 	return 0
 }
 
-// GetXattr gets an extended attribute
-func (fo *FileOperationImpl) GetXattr(name string, dest []byte) (int, syscall.Errno) {
-	path := fo.GetCachePath()
-	if !fo.IsCached() {
-		path = fo.GetSourcePath()
-	}
-
-	size, err := syscall.Getxattr(path, name, dest)
-	if err != nil {
-		return 0, fs.ToErrno(err)
-	}
-
-	return size, 0
-}
-
-// SetXattr sets an extended attribute
-func (fo *FileOperationImpl) SetXattr(name string, value []byte, flags int) syscall.Errno {
-	path := fo.GetCachePath()
-	if !fo.IsCached() {
-		path = fo.GetSourcePath()
-	}
-
-	err := syscall.Setxattr(path, name, value, flags)
-	if err != nil {
-		return fs.ToErrno(err)
-	}
-
-	return 0
-}
-
-// RemoveXattr removes an extended attribute
-func (fo *FileOperationImpl) RemoveXattr(name string) syscall.Errno {
-	path := fo.GetCachePath()
-	if !fo.IsCached() {
-		path = fo.GetSourcePath()
-	}
-
-	err := syscall.Removexattr(path, name)
-	if err != nil {
-		return fs.ToErrno(err)
-	}
-
-	return 0
-}
+// GetXattr, SetXattr, and RemoveXattr are implemented in platform-specific files:
+// - file_operations_linux.go: Linux implementation using syscall.Getxattr/Setxattr/Removexattr
+// - file_operations_other.go: Non-Linux stub implementation
 
 // IsDeleted checks if the file is marked as deleted
 func (fo *FileOperationImpl) IsDeleted() (bool, syscall.Errno) {

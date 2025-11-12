@@ -36,9 +36,7 @@ func BenchmarkPathRebasing(b *testing.B) {
 				if relPath == "" {
 					_ = cacheDir
 				} else {
-					if strings.HasPrefix(relPath, "/") {
-						relPath = relPath[1:]
-					}
+					relPath = strings.TrimPrefix(relPath, "/")
 					_ = filepath.Join(cacheDir, relPath)
 				}
 			}

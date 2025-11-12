@@ -44,7 +44,8 @@ func EnsureDirPermissions(path string) error {
 
 	// Always chmod to ensure kernel sees correct permissions immediately
 	// This is important for FUSE filesystems where kernel might cache wrong attributes
-	if err := syscall.Chmod(path, requiredMode); err != nil {
+	// Cast to uint32 for cross-platform compatibility (Darwin uses uint16 for Stat_t.Mode)
+	if err := syscall.Chmod(path, uint32(requiredMode)); err != nil {
 		return err
 	}
 
