@@ -16,6 +16,7 @@ A FUSE-based versioned overlay filesystem that provides versioning and caching c
 - [Architecture](#architecture)
 - [Sync to Source](#sync-to-source)
 - [Version Management](#version-management)
+- [Daemon Management](#daemon-management)
 - [Security](#security)
 - [Development](#development)
   - [Project Structure](#project-structure)
@@ -36,6 +37,7 @@ A FUSE-based versioned overlay filesystem that provides versioning and caching c
 
 - **Overlay Architecture**: Shadow/caching overlay filesystem using FUSE
 - **Git Auto-Versioning**: Automatic Git commits with idle-based commit strategy
+- **Daemon Mode**: Run filesystem in background with process management
 - **Copy-on-Write**: Files copied to cache only on first write for efficiency
 - **Session Persistence**: Maintains cache across mount/unmount cycles
 - **Performance Optimized**: Buffer pools, async operations, no reflection overhead
@@ -110,8 +112,11 @@ go build -o shadowfs ./cmd/shadowfs
 # Create source and mount directories
 mkdir -p /home/user/source /home/user/mount
 
-# Mount the overlay filesystem
+# Mount the overlay filesystem (foreground mode)
 sudo ./shadowfs /home/user/mount /home/user/source
+
+# Or mount as daemon (background mode)
+sudo ./shadowfs -daemon /home/user/mount /home/user/source
 
 # Use the filesystem normally
 ls /home/user/mount
@@ -119,7 +124,11 @@ echo "new content" > /home/user/mount/newfile.txt
 cat /home/user/mount/newfile.txt
 
 # Unmount when done
+# For foreground mode:
 sudo umount /home/user/mount
+
+# For daemon mode:
+shadowfs stop --mount-point /home/user/mount
 ```
 
 ## Complete Workflow
@@ -357,8 +366,11 @@ sudo ./shadowfs /mnt/project2 /path/to/project2
 #### Unmounting and Remounting
 
 ```bash
-# Unmount filesystem
+# Unmount filesystem (foreground mode)
 sudo umount /mnt/overlay
+
+# Or stop daemon (daemon mode)
+shadowfs stop --mount-point /mnt/overlay
 
 # Modify source directory (safe - filesystem is unmounted)
 cp newfile.txt /path/to/source/
@@ -371,6 +383,43 @@ sudo ./shadowfs /mnt/overlay /path/to/source
 # New files from source are now visible
 ls /mnt/overlay
 ```
+
+#### Daemon Mode
+
+Run shadowfs in the background for long-running mounts:
+
+```bash
+# Start filesystem as daemon
+sudo ./shadowfs -daemon /mnt/overlay /path/to/source
+
+# Start with Git auto-versioning enabled
+sudo ./shadowfs -daemon -auto-git /mnt/overlay /path/to/source
+
+# Daemon runs in background - terminal is free
+# PID file is stored in ~/.shadowfs/daemons/<mount-id>.pid
+
+# Stop daemon gracefully
+shadowfs stop --mount-point /mnt/overlay
+
+# Check if daemon is running (if PID file exists)
+ls ~/.shadowfs/daemons/
+
+# Daemon automatically:
+# - Commits pending Git changes on shutdown
+# - Unmounts filesystem cleanly
+# - Removes PID file on exit
+```
+
+**Daemon Mode Benefits:**
+- Run filesystem in background without keeping terminal open
+- Manage multiple mounts independently
+- Automatic cleanup on shutdown
+- PID file tracking for process management
+
+**PID File Location:**
+- Stored in `~/.shadowfs/daemons/<mount-id>.pid`
+- Contains JSON with PID, mount point, source directory, and start time
+- Automatically cleaned up on graceful shutdown
 
 ### Git Auto-Versioning
 
@@ -509,6 +558,7 @@ git add + git commit (background goroutine)
 - `-git-idle-timeout`: Set idle timeout before commit (default: 30s)
 - `-git-safety-window`: Safety window delay after last write before committing (default: 5s)
 - `-cache-dir`: Custom cache directory (overrides `SHADOWFS_CACHE_DIR`)
+- `-daemon`: Run filesystem as daemon in background
 - `-debug`: Enable debug output for troubleshooting
 
 **Git Repository:**
@@ -755,6 +805,92 @@ shadowfs checkpoint --mount-point /mnt/overlay --file path/to/file.txt
 ```
 
 Checkpoints are automatically tagged in Git for easy identification.
+
+## Daemon Management
+
+ShadowFS supports running as a background daemon process, allowing you to manage long-running mounts without keeping a terminal open.
+
+### Starting a Daemon
+
+```bash
+# Start filesystem as daemon
+sudo ./shadowfs -daemon /mnt/overlay /path/to/source
+
+# Start with Git auto-versioning enabled
+sudo ./shadowfs -daemon -auto-git /mnt/overlay /path/to/source
+
+# Start with custom cache directory
+sudo ./shadowfs -daemon -cache-dir /custom/cache /mnt/overlay /path/to/source
+```
+
+When started with `-daemon` flag:
+- Process forks and runs in background
+- Parent process exits immediately
+- PID file is created in `~/.shadowfs/daemons/<mount-id>.pid`
+- Daemon continues running until stopped
+
+### Stopping a Daemon
+
+```bash
+# Stop daemon by mount point
+shadowfs stop --mount-point /mnt/overlay
+
+# The stop command:
+# - Finds daemon process by mount point
+# - Sends SIGTERM for graceful shutdown
+# - Commits pending Git changes (if enabled)
+# - Unmounts filesystem cleanly
+# - Removes PID file
+```
+
+### PID File Management
+
+PID files are stored in `~/.shadowfs/daemons/` directory:
+
+```bash
+# List all running daemons
+ls ~/.shadowfs/daemons/
+
+# View PID file contents (JSON format)
+cat ~/.shadowfs/daemons/<mount-id>.pid
+
+# PID file contains:
+# {
+#   "pid": 12345,
+#   "mount_point": "/mnt/overlay",
+#   "source_dir": "/path/to/source",
+#   "started_at": "2025-01-01T12:00:00Z"
+# }
+```
+
+**Automatic Cleanup:**
+- PID files are automatically removed on graceful shutdown
+- Stale PID files (process died) are detected and cleaned up
+- Manual cleanup: `rm ~/.shadowfs/daemons/<mount-id>.pid`
+
+### Daemon Mode Benefits
+
+- **Background Operation**: Run without keeping terminal open
+- **Process Management**: Easy start/stop with mount point
+- **Multiple Mounts**: Manage several mounts independently
+- **Automatic Cleanup**: PID files cleaned up on shutdown
+- **Graceful Shutdown**: Commits pending changes before exit
+
+### Troubleshooting Daemon Mode
+
+```bash
+# Check if daemon is running
+ps aux | grep shadowfs
+
+# Check PID file
+cat ~/.shadowfs/daemons/<mount-id>.pid
+
+# Force stop if daemon is unresponsive
+kill -TERM <pid>
+
+# Clean up stale PID file manually
+rm ~/.shadowfs/daemons/<mount-id>.pid
+```
 
 ## Security
 
