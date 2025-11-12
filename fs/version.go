@@ -103,7 +103,8 @@ func findSourceFromProcMounts(mountPoint string) (string, error) {
 
 // GetGitRepository creates a GitManager for an existing cache directory
 func GetGitRepository(cacheDir string) (*GitManager, error) {
-	gitDir := filepath.Join(cacheDir, ".gitofs")
+	// git init creates .gitofs/.git/, so check for .gitofs/.git
+	gitDir := filepath.Join(cacheDir, ".gitofs", ".git")
 	if _, err := os.Stat(gitDir); err != nil {
 		return nil, fmt.Errorf("git repository not found in cache directory: %w", err)
 	}
@@ -128,7 +129,8 @@ func GetGitRepository(cacheDir string) (*GitManager, error) {
 
 // ValidateGitRepository checks if a Git repository exists and is valid
 func ValidateGitRepository(cacheDir string) error {
-	gitDir := filepath.Join(cacheDir, ".gitofs")
+	// git init creates .gitofs/.git/, so check for .gitofs/.git
+	gitDir := filepath.Join(cacheDir, ".gitofs", ".git")
 	if _, err := os.Stat(gitDir); err != nil {
 		return fmt.Errorf("git repository not found: %w", err)
 	}

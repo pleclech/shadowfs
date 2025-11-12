@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	shadowfs "github.com/pleclech/shadowfs/fs"
@@ -92,7 +93,9 @@ func runVersionList(args []string) {
 	}
 
 	// Build git log command
-	cmdArgs := []string{"--git-dir", gm.GetWorkspacePath() + "/.gitofs", "-C", gm.GetWorkspacePath(), "log", "--pretty=format:%h %ad %s", "--date=short"}
+	// git init creates .gitofs/.git/, so use .gitofs/.git for --git-dir
+	gitDir := filepath.Join(gm.GetWorkspacePath(), ".gitofs", ".git")
+	cmdArgs := []string{"--git-dir", gitDir, "-C", gm.GetWorkspacePath(), "log", "--pretty=format:%h %ad %s", "--date=short"}
 	
 	// Expand glob patterns and add paths to git command
 	if len(pathPatterns) > 0 {
@@ -183,7 +186,9 @@ func runVersionDiff(args []string) {
 	}
 
 	// Build git diff command
-	cmdArgs := []string{"--git-dir", gm.GetWorkspacePath() + "/.gitofs", "-C", gm.GetWorkspacePath(), "diff"}
+	// git init creates .gitofs/.git/, so use .gitofs/.git for --git-dir
+	gitDir := filepath.Join(gm.GetWorkspacePath(), ".gitofs", ".git")
+	cmdArgs := []string{"--git-dir", gitDir, "-C", gm.GetWorkspacePath(), "diff"}
 	if *stat {
 		cmdArgs = append(cmdArgs, "--stat")
 	}
@@ -261,7 +266,9 @@ func runVersionRestore(args []string) {
 	}
 
 	// Build git checkout command
-	cmdArgs := []string{"--git-dir", gm.GetWorkspacePath() + "/.gitofs", "-C", gm.GetWorkspacePath(), "checkout"}
+	// git init creates .gitofs/.git/, so use .gitofs/.git for --git-dir
+	gitDir := filepath.Join(gm.GetWorkspacePath(), ".gitofs", ".git")
+	cmdArgs := []string{"--git-dir", gitDir, "-C", gm.GetWorkspacePath(), "checkout"}
 	if *force {
 		cmdArgs = append(cmdArgs, "-f")
 	}
@@ -322,7 +329,9 @@ func runVersionLog(args []string) {
 	}
 
 	// Build git log command
-	cmdArgs := []string{"--git-dir", gm.GetWorkspacePath() + "/.gitofs", "-C", gm.GetWorkspacePath(), "log"}
+	// git init creates .gitofs/.git/, so use .gitofs/.git for --git-dir
+	gitDir := filepath.Join(gm.GetWorkspacePath(), ".gitofs", ".git")
+	cmdArgs := []string{"--git-dir", gitDir, "-C", gm.GetWorkspacePath(), "log"}
 	if *oneline {
 		cmdArgs = append(cmdArgs, "--oneline")
 	}

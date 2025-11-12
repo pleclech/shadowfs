@@ -34,10 +34,10 @@ func TestGitManager_InitializeRepo(t *testing.T) {
 		t.Errorf("InitializeRepo failed: %v", err)
 	}
 
-	// Check if .gitofs directory was created
-	gitDir := filepath.Join(tempDir, ".gitofs")
+	// Check if .gitofs/.git directory was created (git init creates .gitofs/.git/)
+	gitDir := filepath.Join(tempDir, ".gitofs", ".git")
 	if stat, err := os.Stat(gitDir); err != nil || !stat.IsDir() {
-		t.Errorf("Git repository not created properly")
+		t.Errorf("Git repository not created properly: %v", err)
 	}
 
 	// remove we don't want to overwrite an existing .gitignore in source dir

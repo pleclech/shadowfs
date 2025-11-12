@@ -84,7 +84,8 @@ func runCheckpointCommand(args []string) {
 // discoverChangedFiles discovers all files with uncommitted changes using git status
 func discoverChangedFiles(gm *shadowfs.GitManager) ([]string, error) {
 	workspacePath := gm.GetWorkspacePath()
-	gitDir := filepath.Join(workspacePath, ".gitofs")
+	// git init creates .gitofs/.git/, so use .gitofs/.git for --git-dir
+	gitDir := filepath.Join(workspacePath, ".gitofs", ".git")
 
 	// Use git status --porcelain to get list of changed files
 	cmd := exec.Command("git", "--git-dir", gitDir, "-C", workspacePath, "status", "--porcelain")

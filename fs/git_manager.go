@@ -42,7 +42,9 @@ type GitConfig struct {
 
 // NewGitManager creates a new GitManager instance
 func NewGitManager(workspacePath, sourcePath string, config GitConfig) *GitManager {
-	gitDir := filepath.Join(workspacePath, ".gitofs")
+	// gitDir points to the actual .git directory (created by git init)
+	// git init .gitofs creates .gitofs/.git/, so gitDir should be .gitofs/.git
+	gitDir := filepath.Join(workspacePath, ".gitofs", ".git")
 	gm := &GitManager{
 		workspacePath: workspacePath,
 		sourcePath:    sourcePath,
@@ -71,17 +73,26 @@ func (gm *GitManager) startCommitProcessor() {
 			select {
 			case req := <-gm.commitQueue:
 				// Process commit request
+				log.Printf("Git commit processor: Processing commit request for %d file(s), type: %s", len(req.filePaths), req.commitType)
 				var err error
 				if len(req.filePaths) == 1 {
+					log.Printf("Git commit processor: Committing file: %s", req.filePaths[0])
 					err = gm.autoCommitFileSync(req.filePaths[0], req.reason, req.commitType)
 				} else {
+					log.Printf("Git commit processor: Committing batch of %d files", len(req.filePaths))
 					err = gm.autoCommitFilesBatchSync(req.filePaths, req.reason, req.commitType)
+				}
+				if err != nil {
+					log.Printf("Git commit processor: Error committing: %v", err)
+				} else {
+					log.Printf("Git commit processor: Successfully committed")
 				}
 				if req.result != nil {
 					req.result <- err
 				}
 			case <-gm.stopChan:
 				// Process remaining commits before stopping
+				log.Printf("Git commit processor: Stopping, processing remaining commits")
 				for {
 					select {
 					case req := <-gm.commitQueue:
@@ -145,8 +156,9 @@ func (gm *GitManager) InitializeRepo() error {
 func (gm *GitManager) createWorkspaceGit() error {
 	// Initialize Git repository with empty template to avoid issues
 	// Use absolute path to avoid FUSE filesystem issues
-
-	cmd := exec.Command("git", "init", gm.gitDir, "--template=")
+	// git init creates .git/ inside the specified directory, so we pass .gitofs (without .git)
+	gitInitPath := filepath.Join(gm.workspacePath, ".gitofs")
+	cmd := exec.Command("git", "init", gitInitPath, "--template=")
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("git init failed: %w", err)
 	}
@@ -209,9 +221,11 @@ Thumbs.db
 // AutoCommitFile stages and commits a file with automatic message (async, non-blocking)
 func (gm *GitManager) AutoCommitFile(filePath string, reason string) error {
 	if !gm.enabled {
+		log.Printf("AutoCommitFile: Git disabled, skipping commit for %s", filePath)
 		return nil
 	}
 
+	log.Printf("AutoCommitFile: Queuing commit for %s (reason: %s)", filePath, reason)
 	// Queue commit request asynchronously
 	result := make(chan error, 1)
 	select {
@@ -223,10 +237,11 @@ func (gm *GitManager) AutoCommitFile(filePath string, reason string) error {
 	}:
 		// Commit queued successfully, return immediately (non-blocking)
 		// Error will be logged by background processor
+		log.Printf("AutoCommitFile: Successfully queued commit for %s", filePath)
 		return nil
 	default:
 		// Queue full, fall back to synchronous commit
-		log.Printf("Commit queue full, committing synchronously: %s", filePath)
+		log.Printf("AutoCommitFile: Commit queue full, committing synchronously: %s", filePath)
 		return gm.autoCommitFileSync(filePath, reason, "auto-save")
 	}
 }
@@ -255,24 +270,36 @@ func (gm *GitManager) CommitFilesBatchCheckpoint(filePaths []string, reason stri
 
 // autoCommitFileSync performs the actual commit synchronously (internal use)
 func (gm *GitManager) autoCommitFileSync(filePath string, reason string, commitType string) error {
+	log.Printf("autoCommitFileSync: Starting commit for %s (type: %s, reason: %s)", filePath, commitType, reason)
+	log.Printf("autoCommitFileSync: Workspace path: %s, Git dir: %s, Git work dir: %s", gm.workspacePath, gm.gitDir, gm.gitWorkDir)
+	
 	// Validate and convert absolute path to relative path
 	relativePath, err := gm.normalizePath(filePath)
 	if err != nil {
-		log.Printf("Invalid path %s: %v", filePath, err)
+		log.Printf("autoCommitFileSync: Invalid path %s: %v", filePath, err)
 		return fmt.Errorf("invalid path %s: %w", filePath, err)
 	}
+	log.Printf("autoCommitFileSync: Normalized path: %s -> %s", filePath, relativePath)
 
 	// Check if file has changes before committing (efficiency improvement)
-	if !gm.hasFileChanges(relativePath) {
+	hasChanges := gm.hasFileChanges(relativePath)
+	log.Printf("autoCommitFileSync: File %s has changes: %v", relativePath, hasChanges)
+	if !hasChanges {
+		log.Printf("autoCommitFileSync: No changes detected for %s, skipping commit", relativePath)
 		return nil // No changes, skip commit
 	}
 
 	// Stage the file
 	cmd := exec.Command("git", "--git-dir", gm.gitDir, "-C", gm.gitWorkDir, "add", relativePath)
+	log.Printf("autoCommitFileSync: Staging file: git --git-dir %s -C %s add %s", gm.gitDir, gm.gitWorkDir, relativePath)
 	if err := cmd.Run(); err != nil {
-		log.Printf("Failed to stage file %s: %v", relativePath, err)
+		log.Printf("autoCommitFileSync: Failed to stage file %s: %v", relativePath, err)
+		if output, outputErr := cmd.CombinedOutput(); outputErr == nil {
+			log.Printf("autoCommitFileSync: Git add output: %s", string(output))
+		}
 		return fmt.Errorf("failed to stage file %s: %w", relativePath, err)
 	}
+	log.Printf("autoCommitFileSync: Successfully staged file %s", relativePath)
 
 	// Build commit message with type metadata
 	var commitMsg string
@@ -287,14 +314,20 @@ func (gm *GitManager) autoCommitFileSync(filePath string, reason string, commitT
 
 	// Commit with message
 	cmd = exec.Command("git", "--git-dir", gm.gitDir, "-C", gm.gitWorkDir, "commit", "-m", commitMsg)
+	log.Printf("autoCommitFileSync: Committing: git --git-dir %s -C %s commit -m \"%s\"", gm.gitDir, gm.gitWorkDir, commitMsg)
 	if err := cmd.Run(); err != nil {
 		// Check if commit failed because there are no changes (common case)
+		if output, outputErr := cmd.CombinedOutput(); outputErr == nil {
+			log.Printf("autoCommitFileSync: Git commit output: %s", string(output))
+		}
 		if strings.Contains(err.Error(), "nothing to commit") {
+			log.Printf("autoCommitFileSync: Nothing to commit for %s", relativePath)
 			return nil // Not an error, just no changes
 		}
-		log.Printf("Failed to commit file %s: %v", relativePath, err)
+		log.Printf("autoCommitFileSync: Failed to commit file %s: %v", relativePath, err)
 		return fmt.Errorf("failed to commit file %s: %w", relativePath, err)
 	}
+	log.Printf("autoCommitFileSync: Successfully committed file %s", relativePath)
 
 	// Tag commit with type if checkpoint
 	if commitType == "checkpoint" {
@@ -400,22 +433,27 @@ func (gm *GitManager) autoCommitFilesBatchSync(filePaths []string, reason string
 
 // normalizePath converts absolute path to relative path, validates it
 func (gm *GitManager) normalizePath(filePath string) (string, error) {
+	log.Printf("normalizePath: Converting path %s (workspace: %s)", filePath, gm.workspacePath)
 	if !filepath.IsAbs(filePath) {
 		// Already relative, validate it's within workspace
+		log.Printf("normalizePath: Path %s is already relative", filePath)
 		return filePath, nil
 	}
 
 	// Convert absolute cache path to relative path for git
 	rel, err := filepath.Rel(gm.workspacePath, filePath)
 	if err != nil {
+		log.Printf("normalizePath: Failed to compute relative path: %v", err)
 		return "", fmt.Errorf("path %s is not within workspace %s: %w", filePath, gm.workspacePath, err)
 	}
 
 	// Security: prevent path traversal
 	if strings.HasPrefix(rel, "..") {
+		log.Printf("normalizePath: Path traversal detected: %s", rel)
 		return "", fmt.Errorf("invalid path traversal detected: %s", rel)
 	}
 
+	log.Printf("normalizePath: Converted %s -> %s", filePath, rel)
 	return rel, nil
 }
 
@@ -423,16 +461,21 @@ func (gm *GitManager) normalizePath(filePath string) (string, error) {
 func (gm *GitManager) hasFileChanges(relativePath string) bool {
 	// Check if file is new (untracked)
 	cmd := exec.Command("git", "--git-dir", gm.gitDir, "-C", gm.gitWorkDir, "ls-files", "--error-unmatch", "--", relativePath)
+	log.Printf("hasFileChanges: Checking if file is tracked: git --git-dir %s -C %s ls-files --error-unmatch -- %s", gm.gitDir, gm.gitWorkDir, relativePath)
 	if err := cmd.Run(); err != nil {
 		// File is not tracked, so it's a new file (has changes)
+		log.Printf("hasFileChanges: File %s is not tracked (new file), has changes: true", relativePath)
 		return true
 	}
 
 	// File is tracked, check if it has modifications
 	cmd = exec.Command("git", "--git-dir", gm.gitDir, "-C", gm.gitWorkDir, "diff", "--quiet", "--", relativePath)
+	log.Printf("hasFileChanges: Checking if file has modifications: git --git-dir %s -C %s diff --quiet -- %s", gm.gitDir, gm.gitWorkDir, relativePath)
 	err := cmd.Run()
 	// git diff --quiet returns 0 if no changes, 1 if changes exist
-	return err != nil
+	hasChanges := err != nil
+	log.Printf("hasFileChanges: File %s is tracked, has changes: %v", relativePath, hasChanges)
+	return hasChanges
 }
 
 // GetWorkspacePath returns the workspace path

@@ -54,7 +54,8 @@ func validateCommitHash(gm *shadowfs.GitManager, hash string) error {
 
 	// Check if commit exists in repository
 	workspacePath := gm.GetWorkspacePath()
-	gitDir := filepath.Join(workspacePath, ".gitofs")
+	// git init creates .gitofs/.git/, so use .gitofs/.git for --git-dir
+	gitDir := filepath.Join(workspacePath, ".gitofs", ".git")
 	cmd := exec.Command("git", "--git-dir", gitDir, "-C", workspacePath, "cat-file", "-e", hash)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("commit hash does not exist in repository: %s", hash)

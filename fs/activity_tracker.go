@@ -35,6 +35,7 @@ func NewActivityTracker(shadowNode *ShadowNode, config GitConfig) *ActivityTrack
 // MarkActivity records activity for a file and starts/resets the commit timer
 func (at *ActivityTracker) MarkActivity(filePath string) {
 	if !at.shadowNode.gitManager.IsEnabled() {
+		Debug("MarkActivity: Git disabled, skipping tracking for %s", filePath)
 		return // Git disabled, no tracking needed
 	}
 	at.mutex.Lock()
@@ -45,10 +46,12 @@ func (at *ActivityTracker) MarkActivity(filePath string) {
 	// Stop existing timer if any
 	if existingTimer, exists := at.fileTimers[filePath]; exists {
 		existingTimer.timer.Stop()
+		Debug("MarkActivity: Stopped existing timer for %s", filePath)
 	}
 
 	// Create new timer that will commit after idle timeout
 	timer := time.AfterFunc(at.config.IdleTimeout, func() {
+		Debug("MarkActivity: Timer fired for %s (idle timeout: %v)", filePath, at.config.IdleTimeout)
 		at.commitFile(filePath)
 	})
 
@@ -57,6 +60,9 @@ func (at *ActivityTracker) MarkActivity(filePath string) {
 		timer:        timer,
 		lastActivity: now,
 	}
+	
+	Debug("MarkActivity: Started timer for %s (idle timeout: %v, safety window: %v)", 
+		filePath, at.config.IdleTimeout, at.config.SafetyWindow)
 }
 
 // CommitAllPending commits all files with pending timers before shutdown
@@ -103,17 +109,20 @@ func (at *ActivityTracker) StopIdleMonitoring() {
 
 // commitFile commits a file when its timer expires
 func (at *ActivityTracker) commitFile(filePath string) {
+	Debug("commitFile: Attempting to commit %s", filePath)
 	at.mutex.Lock()
 	
 	// Check if file still exists in tracking (might have been removed)
 	fileTimer, exists := at.fileTimers[filePath]
 	if !exists {
+		Debug("commitFile: File %s no longer in tracking, skipping", filePath)
 		at.mutex.Unlock()
 		return
 	}
 
 	// Calculate time since last activity
 	timeSinceLastWrite := time.Since(fileTimer.lastActivity)
+	Debug("commitFile: Time since last write for %s: %v", filePath, timeSinceLastWrite)
 	
 	// Check if safety window has passed
 	safetyWindow := at.config.SafetyWindow
@@ -125,6 +134,7 @@ func (at *ActivityTracker) commitFile(filePath string) {
 	if timeSinceLastWrite < safetyWindow {
 		// Safety window not yet passed - reschedule commit
 		remainingTime := safetyWindow - timeSinceLastWrite
+		Debug("commitFile: Safety window not passed for %s, rescheduling in %v", filePath, remainingTime)
 		at.mutex.Unlock()
 		
 		// Reschedule timer for remaining safety window time
@@ -145,6 +155,7 @@ func (at *ActivityTracker) commitFile(filePath string) {
 	}
 
 	// Safety window passed - proceed with commit
+	Debug("commitFile: Safety window passed for %s, proceeding with commit", filePath)
 	// Remove from tracking before committing (to prevent race conditions)
 	delete(at.fileTimers, filePath)
 	at.mutex.Unlock()
@@ -154,10 +165,15 @@ func (at *ActivityTracker) commitFile(filePath string) {
 		// Build commit reason with timing info
 		reason := fmt.Sprintf("Auto-commit after idle period (idle: %v, last-write: %v ago)", 
 			at.config.IdleTimeout, timeSinceLastWrite)
+		Debug("commitFile: Calling AutoCommitFile for %s with reason: %s", filePath, reason)
 		err := at.shadowNode.gitManager.AutoCommitFile(filePath, reason)
 		if err != nil {
 			log.Printf("Failed to commit file %s: %v", filePath, err)
+		} else {
+			Debug("commitFile: Successfully queued commit for %s", filePath)
 		}
+	} else {
+		Debug("commitFile: File %s has no significant changes, skipping commit", filePath)
 	}
 }
 

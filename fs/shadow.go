@@ -61,6 +61,7 @@ func (n *ShadowNode) InitGitManager(config GitConfig) error {
 func (n *ShadowNode) HandleWriteActivity(filePath string) {
 	// ignore all .git/ files
 	if strings.Contains(filePath, ".gitofs/") {
+		Debug("HandleWriteActivity: Ignoring .gitofs file: %s", filePath)
 		return
 	}
 
@@ -70,10 +71,16 @@ func (n *ShadowNode) HandleWriteActivity(filePath string) {
 	if strings.HasPrefix(filePath, n.cachePath) {
 		// Path is in cache - convert to mount point path
 		mountPointPath = n.RebasePathUsingMountPoint(filePath)
+		Debug("HandleWriteActivity: Converted cache path %s -> mount point path %s", filePath, mountPointPath)
+	} else {
+		Debug("HandleWriteActivity: Using path as-is (not cache path): %s", filePath)
 	}
 
 	if n.activityTracker != nil {
+		Debug("HandleWriteActivity: Tracking activity for %s", mountPointPath)
 		n.activityTracker.MarkActivity(mountPointPath)
+	} else {
+		Debug("HandleWriteActivity: Activity tracker is nil, cannot track %s", mountPointPath)
 	}
 }
 
@@ -1226,6 +1233,16 @@ func newShadowNode(rootData *fs.LoopbackRoot, parent *fs.Inode, _ string, _ *sys
 			n.mountPoint = parentNode.mountPoint
 			n.srcDir = parentNode.srcDir
 			n.mountID = parentNode.mountID
+			// CRITICAL: Inherit git manager and activity tracker from parent
+			// This ensures all child nodes can track write activity for auto-commits
+			n.gitManager = parentNode.gitManager
+			n.activityTracker = parentNode.activityTracker
+			if n.gitManager != nil {
+				Debug("newShadowNode: Inherited git manager from parent")
+			}
+			if n.activityTracker != nil {
+				Debug("newShadowNode: Inherited activity tracker from parent")
+			}
 		}
 	}
 

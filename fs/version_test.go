@@ -36,10 +36,15 @@ func TestFindCacheDirectory(t *testing.T) {
 		t.Fatalf("Failed to create session path: %v", err)
 	}
 
-	// Create .gitofs directory
+	// Create .gitofs directory (git init creates .gitofs/.git/ inside it)
 	gitDir := filepath.Join(sessionPath, ".gitofs")
 	if err := os.MkdirAll(gitDir, 0755); err != nil {
 		t.Fatalf("Failed to create git dir: %v", err)
+	}
+	// Create .git subdirectory to simulate git init
+	gitGitDir := filepath.Join(gitDir, ".git")
+	if err := os.MkdirAll(gitGitDir, 0755); err != nil {
+		t.Fatalf("Failed to create .git subdirectory: %v", err)
 	}
 
 	// Create .target file
@@ -76,8 +81,8 @@ func TestValidateGitRepository(t *testing.T) {
 		t.Error("Expected error for non-existent git repository")
 	}
 
-	// Create .gitofs directory
-	gitDir := filepath.Join(tempDir, ".gitofs")
+	// Create .gitofs/.git directory structure (as created by git init)
+	gitDir := filepath.Join(tempDir, ".gitofs", ".git")
 	if err := os.MkdirAll(gitDir, 0755); err != nil {
 		t.Fatalf("Failed to create git dir: %v", err)
 	}
@@ -108,8 +113,8 @@ func TestGetGitRepository(t *testing.T) {
 
 	sourceDir := filepath.Join(tempDir, "source")
 
-	// Create .gitofs directory
-	gitDir := filepath.Join(tempDir, ".gitofs")
+	// Create .gitofs/.git directory structure (as created by git init)
+	gitDir := filepath.Join(tempDir, ".gitofs", ".git")
 	if err := os.MkdirAll(gitDir, 0755); err != nil {
 		t.Fatalf("Failed to create git dir: %v", err)
 	}
