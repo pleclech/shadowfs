@@ -1151,7 +1151,7 @@ shadowfs/
 │   │   └── path.go           # Path rebasing utilities
 │   └── cache/                 # Cache/mirror operations package
 │       └── mirror.go          # Cache mirroring and file copy operations
-├── integration_test.go         # Full FUSE integration tests
+├── filesystem_integration_test.go  # Full FUSE integration tests
 ├── LICENSE                     # MIT License
 ├── go.mod                      # Go module definition
 ├── go.sum                      # Go module checksums

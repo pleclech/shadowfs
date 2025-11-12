@@ -85,13 +85,14 @@ func validateBackupID(backupID string) error {
 		return fmt.Errorf("backup ID is required")
 	}
 
-	// Basic format validation (backup IDs are hex strings)
-	matched, err := regexp.MatchString(`^[0-9a-fA-F]{32,64}$`, backupID)
+	// Basic format validation (backup IDs are timestamp-mountID format: YYYYMMDD-HHMMSS-hexstring)
+	// Example: 20251112-212650-b75adc5e6e8a
+	matched, err := regexp.MatchString(`^\d{8}-\d{6}-[0-9a-fA-F]{12,64}$`, backupID)
 	if err != nil {
 		return fmt.Errorf("invalid backup ID format: %w", err)
 	}
 	if !matched {
-		return fmt.Errorf("invalid backup ID format (must be hex string): %s", backupID)
+		return fmt.Errorf("invalid backup ID format (must be timestamp-mountID format): %s", backupID)
 	}
 
 	// Check if backup exists

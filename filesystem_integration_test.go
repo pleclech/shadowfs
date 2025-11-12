@@ -1440,3 +1440,862 @@ func TestFilesystem_FirstWriteAutoCommit_DaemonMode(t *testing.T) {
 		t.Errorf("File content mismatch: expected %q, got %q", expectedContent, string(content))
 	}
 }
+
+// Sync CLI Integration Tests
+
+func TestSyncCommand_BasicSync(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	mountPoint := t.TempDir()
+	srcDir := t.TempDir()
+
+	// Create initial source file
+	srcFile := filepath.Join(srcDir, "test.txt")
+	if err := os.WriteFile(srcFile, []byte("initial"), 0644); err != nil {
+		t.Fatalf("Failed to create source file: %v", err)
+	}
+
+	// Start filesystem
+	cmd := exec.Command(testBinary, mountPoint, srcDir)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Failed to start filesystem: %v", err)
+	}
+	defer func() {
+		gracefulShutdown(cmd, mountPoint, t)
+	}()
+
+	// Wait for filesystem to be ready
+	time.Sleep(100 * time.Millisecond)
+
+	// Modify file in mount point (this triggers copy-on-write to cache)
+	mountedFile := filepath.Join(mountPoint, "test.txt")
+	// Open file for writing (this creates it in cache if needed)
+	f, err := os.OpenFile(mountedFile, os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		t.Fatalf("Failed to open file for writing: %v", err)
+	}
+	// Write new content
+	if _, err := f.Write([]byte("modified")); err != nil {
+		f.Close()
+		t.Fatalf("Failed to write to file: %v", err)
+	}
+	// Sync to ensure it's written to disk
+	if err := f.Sync(); err != nil {
+		f.Close()
+		t.Fatalf("Failed to sync file: %v", err)
+	}
+	f.Close()
+
+	// Wait a bit for copy-on-write to complete
+	time.Sleep(500 * time.Millisecond)
+
+	// Run sync command
+	syncCmd := exec.Command(testBinary, "sync", "--mount-point", mountPoint)
+	output, err := syncCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Sync command failed: %v, output: %s", err, string(output))
+	}
+
+	// Debug: show sync output
+	t.Logf("Sync output: %s", string(output))
+
+	// Verify file was synced to source
+	content, err := os.ReadFile(srcFile)
+	if err != nil {
+		t.Fatalf("Failed to read source file: %v", err)
+	}
+	if string(content) != "modified" {
+		t.Errorf("Expected 'modified' in source, got '%s'. Sync output: %s", string(content), string(output))
+	}
+
+	// Verify backup was created (check output contains backup ID)
+	if !strings.Contains(string(output), "Backup created:") {
+		t.Error("Expected backup to be created, but output doesn't mention backup")
+	}
+}
+
+func TestSyncCommand_DryRun(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	mountPoint := t.TempDir()
+	srcDir := t.TempDir()
+
+	// Create initial source file
+	srcFile := filepath.Join(srcDir, "test.txt")
+	if err := os.WriteFile(srcFile, []byte("initial"), 0644); err != nil {
+		t.Fatalf("Failed to create source file: %v", err)
+	}
+
+	// Start filesystem
+	cmd := exec.Command(testBinary, mountPoint, srcDir)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Failed to start filesystem: %v", err)
+	}
+	defer func() {
+		gracefulShutdown(cmd, mountPoint, t)
+	}()
+
+	// Wait for filesystem to be ready
+	time.Sleep(100 * time.Millisecond)
+
+	// Modify file in mount point
+	mountedFile := filepath.Join(mountPoint, "test.txt")
+	if err := os.WriteFile(mountedFile, []byte("modified"), 0644); err != nil {
+		t.Fatalf("Failed to modify file: %v", err)
+	}
+
+	// Run sync command with dry-run
+	syncCmd := exec.Command(testBinary, "sync", "--mount-point", mountPoint, "--dry-run")
+	output, err := syncCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Sync dry-run command failed: %v, output: %s", err, string(output))
+	}
+
+	// Verify file was NOT synced to source (dry-run shouldn't modify)
+	content, err := os.ReadFile(srcFile)
+	if err != nil {
+		t.Fatalf("Failed to read source file: %v", err)
+	}
+	if string(content) != "initial" {
+		t.Errorf("Expected 'initial' in source (dry-run shouldn't modify), got '%s'", string(content))
+	}
+
+	// Verify output mentions dry-run
+	if !strings.Contains(string(output), "Would sync") {
+		t.Error("Expected dry-run output to mention 'Would sync'")
+	}
+}
+
+func TestSyncCommand_SingleFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	mountPoint := t.TempDir()
+	srcDir := t.TempDir()
+
+	// Create multiple source files
+	files := map[string]string{
+		"file1.txt": "content1",
+		"file2.txt": "content2",
+		"file3.txt": "content3",
+	}
+	for path, content := range files {
+		fullPath := filepath.Join(srcDir, path)
+		if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
+			t.Fatalf("Failed to create file %s: %v", path, err)
+		}
+	}
+
+	// Start filesystem
+	cmd := exec.Command(testBinary, mountPoint, srcDir)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Failed to start filesystem: %v", err)
+	}
+	defer func() {
+		gracefulShutdown(cmd, mountPoint, t)
+	}()
+
+	// Wait for filesystem to be ready
+	time.Sleep(100 * time.Millisecond)
+
+	// Modify only file1.txt in mount point
+	mountedFile1 := filepath.Join(mountPoint, "file1.txt")
+	if err := os.WriteFile(mountedFile1, []byte("modified1"), 0644); err != nil {
+		t.Fatalf("Failed to modify file1.txt: %v", err)
+	}
+
+	// Run sync command for single file
+	syncCmd := exec.Command(testBinary, "sync", "--mount-point", mountPoint, "--file", "file1.txt")
+	output, err := syncCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Sync command failed: %v, output: %s", err, string(output))
+	}
+
+	// Verify file1.txt was synced
+	srcFile1 := filepath.Join(srcDir, "file1.txt")
+	content, err := os.ReadFile(srcFile1)
+	if err != nil {
+		t.Fatalf("Failed to read source file1.txt: %v", err)
+	}
+	if string(content) != "modified1" {
+		t.Errorf("Expected 'modified1' in source file1.txt, got '%s'", string(content))
+	}
+
+	// Verify other files were NOT synced
+	srcFile2 := filepath.Join(srcDir, "file2.txt")
+	content2, err := os.ReadFile(srcFile2)
+	if err != nil {
+		t.Fatalf("Failed to read source file2.txt: %v", err)
+	}
+	if string(content2) != "content2" {
+		t.Errorf("Expected 'content2' in source file2.txt (should not be synced), got '%s'", string(content2))
+	}
+
+	// Verify output mentions the synced file
+	if !strings.Contains(string(output), "file1.txt") {
+		t.Error("Expected sync output to mention file1.txt")
+	}
+}
+
+func TestSyncCommand_Directory(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	mountPoint := t.TempDir()
+	srcDir := t.TempDir()
+
+	// Create directory structure
+	dirs := map[string]string{
+		"dir1/file1.txt": "content1",
+		"dir1/file2.txt": "content2",
+		"dir2/file3.txt": "content3",
+		"file4.txt":      "content4",
+	}
+	for path, content := range dirs {
+		fullPath := filepath.Join(srcDir, path)
+		dir := filepath.Dir(fullPath)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatalf("Failed to create directory %s: %v", dir, err)
+		}
+		if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
+			t.Fatalf("Failed to create file %s: %v", path, err)
+		}
+	}
+
+	// Start filesystem
+	cmd := exec.Command(testBinary, mountPoint, srcDir)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Failed to start filesystem: %v", err)
+	}
+	defer func() {
+		gracefulShutdown(cmd, mountPoint, t)
+	}()
+
+	// Wait for filesystem to be ready
+	time.Sleep(100 * time.Millisecond)
+
+	// Modify files in dir1
+	mountedFile1 := filepath.Join(mountPoint, "dir1", "file1.txt")
+	if err := os.WriteFile(mountedFile1, []byte("modified1"), 0644); err != nil {
+		t.Fatalf("Failed to modify dir1/file1.txt: %v", err)
+	}
+	mountedFile2 := filepath.Join(mountPoint, "dir1", "file2.txt")
+	if err := os.WriteFile(mountedFile2, []byte("modified2"), 0644); err != nil {
+		t.Fatalf("Failed to modify dir1/file2.txt: %v", err)
+	}
+
+	// Run sync command for directory
+	syncCmd := exec.Command(testBinary, "sync", "--mount-point", mountPoint, "--dir", "dir1")
+	output, err := syncCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Sync command failed: %v, output: %s", err, string(output))
+	}
+
+	// Verify dir1 files were synced
+	srcFile1 := filepath.Join(srcDir, "dir1", "file1.txt")
+	content, err := os.ReadFile(srcFile1)
+	if err != nil {
+		t.Fatalf("Failed to read source dir1/file1.txt: %v", err)
+	}
+	if string(content) != "modified1" {
+		t.Errorf("Expected 'modified1' in source dir1/file1.txt, got '%s'", string(content))
+	}
+
+	// Verify dir2 and root files were NOT synced
+	srcFile3 := filepath.Join(srcDir, "dir2", "file3.txt")
+	content3, err := os.ReadFile(srcFile3)
+	if err != nil {
+		t.Fatalf("Failed to read source dir2/file3.txt: %v", err)
+	}
+	if string(content3) != "content3" {
+		t.Errorf("Expected 'content3' in source dir2/file3.txt (should not be synced), got '%s'", string(content3))
+	}
+}
+
+func TestSyncCommand_Rollback(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	mountPoint := t.TempDir()
+	srcDir := t.TempDir()
+
+	// Create initial source file
+	srcFile := filepath.Join(srcDir, "test.txt")
+	if err := os.WriteFile(srcFile, []byte("initial"), 0644); err != nil {
+		t.Fatalf("Failed to create source file: %v", err)
+	}
+
+	// Start filesystem
+	cmd := exec.Command(testBinary, mountPoint, srcDir)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Failed to start filesystem: %v", err)
+	}
+	defer func() {
+		gracefulShutdown(cmd, mountPoint, t)
+	}()
+
+	// Wait for filesystem to be ready
+	time.Sleep(100 * time.Millisecond)
+
+	// Modify file in mount point (this triggers copy-on-write to cache)
+	mountedFile := filepath.Join(mountPoint, "test.txt")
+	// Open file for writing (this creates it in cache if needed)
+	f, err := os.OpenFile(mountedFile, os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		t.Fatalf("Failed to open file for writing: %v", err)
+	}
+	// Write new content
+	if _, err := f.Write([]byte("modified")); err != nil {
+		f.Close()
+		t.Fatalf("Failed to write to file: %v", err)
+	}
+	// Sync to ensure it's written to disk
+	if err := f.Sync(); err != nil {
+		f.Close()
+		t.Fatalf("Failed to sync file: %v", err)
+	}
+	f.Close()
+
+	// Wait a bit for copy-on-write to complete
+	time.Sleep(500 * time.Millisecond)
+
+	// Run sync command (creates backup)
+	syncCmd := exec.Command(testBinary, "sync", "--mount-point", mountPoint)
+	output, err := syncCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Sync command failed: %v, output: %s", err, string(output))
+	}
+
+	// Extract backup ID from output
+	backupID := ""
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "Backup created:") {
+			parts := strings.Fields(line)
+			if len(parts) >= 3 {
+				backupID = parts[2]
+				break
+			}
+		}
+	}
+	if backupID == "" {
+		t.Fatal("Failed to extract backup ID from sync output")
+	}
+
+	// Verify file was synced
+	content, err := os.ReadFile(srcFile)
+	if err != nil {
+		t.Fatalf("Failed to read source file: %v", err)
+	}
+	if string(content) != "modified" {
+		t.Errorf("Expected 'modified' in source, got '%s'", string(content))
+	}
+
+	// Modify source file again
+	if err := os.WriteFile(srcFile, []byte("modified again"), 0644); err != nil {
+		t.Fatalf("Failed to modify source file: %v", err)
+	}
+
+	// Run rollback command
+	rollbackCmd := exec.Command(testBinary, "sync", "--mount-point", mountPoint, "--rollback", "--backup-id", backupID)
+	rollbackOutput, err := rollbackCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Rollback command failed: %v, output: %s", err, string(rollbackOutput))
+	}
+
+	// Verify file was restored to original state
+	content, err = os.ReadFile(srcFile)
+	if err != nil {
+		t.Fatalf("Failed to read source file after rollback: %v", err)
+	}
+	if string(content) != "initial" {
+		t.Errorf("Expected 'initial' after rollback, got '%s'", string(content))
+	}
+}
+
+func TestSyncCommand_NoBackup(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	mountPoint := t.TempDir()
+	srcDir := t.TempDir()
+
+	// Create initial source file
+	srcFile := filepath.Join(srcDir, "test.txt")
+	if err := os.WriteFile(srcFile, []byte("initial"), 0644); err != nil {
+		t.Fatalf("Failed to create source file: %v", err)
+	}
+
+	// Start filesystem
+	cmd := exec.Command(testBinary, mountPoint, srcDir)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Failed to start filesystem: %v", err)
+	}
+	defer func() {
+		gracefulShutdown(cmd, mountPoint, t)
+	}()
+
+	// Wait for filesystem to be ready
+	time.Sleep(100 * time.Millisecond)
+
+	// Modify file in mount point
+	mountedFile := filepath.Join(mountPoint, "test.txt")
+	if err := os.WriteFile(mountedFile, []byte("modified"), 0644); err != nil {
+		t.Fatalf("Failed to modify file: %v", err)
+	}
+
+	// Run sync command without backup
+	syncCmd := exec.Command(testBinary, "sync", "--mount-point", mountPoint, "--no-backup")
+	output, err := syncCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Sync command failed: %v, output: %s", err, string(output))
+	}
+
+	// Verify file was synced
+	content, err := os.ReadFile(srcFile)
+	if err != nil {
+		t.Fatalf("Failed to read source file: %v", err)
+	}
+	if string(content) != "modified" {
+		t.Errorf("Expected 'modified' in source, got '%s'", string(content))
+	}
+
+	// Verify backup was NOT created (output should not mention backup)
+	if strings.Contains(string(output), "Backup created:") {
+		t.Error("Expected no backup to be created, but output mentions backup")
+	}
+}
+
+// Version Restore CLI Integration Tests
+
+func TestVersionRestore_SingleFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	mountPoint := t.TempDir()
+	srcDir := t.TempDir()
+
+	// Start filesystem with Git enabled
+	cmd := exec.Command(testBinary, "-auto-git", mountPoint, srcDir)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Failed to start filesystem: %v", err)
+	}
+	defer func() {
+		gracefulShutdown(cmd, mountPoint, t)
+	}()
+
+	// Wait for filesystem to be ready
+	time.Sleep(100 * time.Millisecond)
+
+	// Create initial file and wait for commit
+	file1 := filepath.Join(mountPoint, "file1.txt")
+	if err := os.WriteFile(file1, []byte("version1"), 0644); err != nil {
+		t.Fatalf("Failed to create file1.txt: %v", err)
+	}
+	// Wait longer for auto-commit (idle timeout + safety window)
+	time.Sleep(7 * time.Second)
+
+	// Get first commit hash
+	gitDir := filepath.Join(mountPoint, shadowfs.GitofsName, ".git")
+	gitCmd := exec.Command("git", "--git-dir", gitDir, "-C", mountPoint, "log", "--oneline", "-1", "--format=%H")
+	output, err := gitCmd.CombinedOutput()
+	if err != nil {
+		// If no commits yet, skip this test
+		if strings.Contains(string(output), "does not have any commits yet") || strings.Contains(string(output), "fatal: your current branch") {
+			t.Skip("No commits yet, skipping test")
+		}
+		t.Fatalf("Failed to get commit hash: %v, output: %s", err, string(output))
+	}
+	firstCommit := strings.TrimSpace(string(output))
+	if firstCommit == "" {
+		t.Skip("No commits found, skipping test")
+	}
+
+	// Modify file
+	if err := os.WriteFile(file1, []byte("version2"), 0644); err != nil {
+		t.Fatalf("Failed to modify file1.txt: %v", err)
+	}
+	// Wait longer for auto-commit (idle timeout + safety window)
+	time.Sleep(7 * time.Second)
+
+	// Verify file is modified
+	content, err := os.ReadFile(file1)
+	if err != nil {
+		t.Fatalf("Failed to read file1.txt: %v", err)
+	}
+	if string(content) != "version2" {
+		t.Errorf("Expected 'version2', got '%s'", string(content))
+	}
+
+	// Restore file from first commit
+	restoreCmd := exec.Command(testBinary, "version", "restore", "--mount-point", mountPoint, "--file", "file1.txt", firstCommit)
+	restoreOutput, err := restoreCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Restore command failed: %v, output: %s", err, string(restoreOutput))
+	}
+
+	// Verify file was restored
+	content, err = os.ReadFile(file1)
+	if err != nil {
+		t.Fatalf("Failed to read file1.txt after restore: %v", err)
+	}
+	if string(content) != "version1" {
+		t.Errorf("Expected 'version1' after restore, got '%s'", string(content))
+	}
+}
+
+func TestVersionRestore_Directory(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	mountPoint := t.TempDir()
+	srcDir := t.TempDir()
+
+	// Start filesystem with Git enabled
+	cmd := exec.Command(testBinary, "-auto-git", mountPoint, srcDir)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Failed to start filesystem: %v", err)
+	}
+	defer func() {
+		gracefulShutdown(cmd, mountPoint, t)
+	}()
+
+	// Wait for filesystem to be ready
+	time.Sleep(100 * time.Millisecond)
+
+	// Create directory with files
+	dir1 := filepath.Join(mountPoint, "dir1")
+	if err := os.MkdirAll(dir1, 0755); err != nil {
+		t.Fatalf("Failed to create dir1: %v", err)
+	}
+	file1 := filepath.Join(dir1, "file1.txt")
+	if err := os.WriteFile(file1, []byte("version1"), 0644); err != nil {
+		t.Fatalf("Failed to create dir1/file1.txt: %v", err)
+	}
+	file2 := filepath.Join(dir1, "file2.txt")
+	if err := os.WriteFile(file2, []byte("version1"), 0644); err != nil {
+		t.Fatalf("Failed to create dir1/file2.txt: %v", err)
+	}
+	// Wait longer for auto-commit (idle timeout + safety window)
+	time.Sleep(7 * time.Second)
+
+	// Get first commit hash
+	gitDir := filepath.Join(mountPoint, shadowfs.GitofsName, ".git")
+	gitCmd := exec.Command("git", "--git-dir", gitDir, "-C", mountPoint, "log", "--oneline", "-1", "--format=%H")
+	output, err := gitCmd.CombinedOutput()
+	if err != nil {
+		if strings.Contains(string(output), "does not have any commits yet") || strings.Contains(string(output), "fatal: your current branch") {
+			t.Skip("No commits yet, skipping test")
+		}
+		t.Fatalf("Failed to get commit hash: %v, output: %s", err, string(output))
+	}
+	firstCommit := strings.TrimSpace(string(output))
+	if firstCommit == "" {
+		t.Skip("No commits found, skipping test")
+	}
+
+	// Modify files
+	if err := os.WriteFile(file1, []byte("version2"), 0644); err != nil {
+		t.Fatalf("Failed to modify dir1/file1.txt: %v", err)
+	}
+	if err := os.WriteFile(file2, []byte("version2"), 0644); err != nil {
+		t.Fatalf("Failed to modify dir1/file2.txt: %v", err)
+	}
+	// Wait longer for auto-commit (idle timeout + safety window)
+	time.Sleep(7 * time.Second)
+
+	// Restore directory from first commit
+	restoreCmd := exec.Command(testBinary, "version", "restore", "--mount-point", mountPoint, "--dir", "dir1", firstCommit)
+	restoreOutput, err := restoreCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Restore command failed: %v, output: %s", err, string(restoreOutput))
+	}
+
+	// Verify files were restored
+	content, err := os.ReadFile(file1)
+	if err != nil {
+		t.Fatalf("Failed to read dir1/file1.txt after restore: %v", err)
+	}
+	if string(content) != "version1" {
+		t.Errorf("Expected 'version1' in file1.txt after restore, got '%s'", string(content))
+	}
+
+	content, err = os.ReadFile(file2)
+	if err != nil {
+		t.Fatalf("Failed to read dir1/file2.txt after restore: %v", err)
+	}
+	if string(content) != "version1" {
+		t.Errorf("Expected 'version1' in file2.txt after restore, got '%s'", string(content))
+	}
+}
+
+func TestVersionRestore_Workspace(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	mountPoint := t.TempDir()
+	srcDir := t.TempDir()
+
+	// Start filesystem with Git enabled
+	cmd := exec.Command(testBinary, "-auto-git", mountPoint, srcDir)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Failed to start filesystem: %v", err)
+	}
+	defer func() {
+		gracefulShutdown(cmd, mountPoint, t)
+	}()
+
+	// Wait for filesystem to be ready
+	time.Sleep(100 * time.Millisecond)
+
+	// Create multiple files
+	files := map[string]string{
+		"file1.txt":      "version1",
+		"file2.txt":      "version1",
+		"dir1/file3.txt": "version1",
+	}
+	for path, content := range files {
+		fullPath := filepath.Join(mountPoint, path)
+		dir := filepath.Dir(fullPath)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatalf("Failed to create directory %s: %v", dir, err)
+		}
+		if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
+			t.Fatalf("Failed to create file %s: %v", path, err)
+		}
+	}
+	// Wait longer for auto-commit (idle timeout + safety window)
+	time.Sleep(7 * time.Second)
+
+	// Get first commit hash
+	gitDir := filepath.Join(mountPoint, shadowfs.GitofsName, ".git")
+	gitCmd := exec.Command("git", "--git-dir", gitDir, "-C", mountPoint, "log", "--oneline", "-1", "--format=%H")
+	output, err := gitCmd.CombinedOutput()
+	if err != nil {
+		if strings.Contains(string(output), "does not have any commits yet") || strings.Contains(string(output), "fatal: your current branch") {
+			t.Skip("No commits yet, skipping test")
+		}
+		t.Fatalf("Failed to get commit hash: %v, output: %s", err, string(output))
+	}
+	firstCommit := strings.TrimSpace(string(output))
+	if firstCommit == "" {
+		t.Skip("No commits found, skipping test")
+	}
+
+	// Modify all files
+	for path := range files {
+		fullPath := filepath.Join(mountPoint, path)
+		if err := os.WriteFile(fullPath, []byte("version2"), 0644); err != nil {
+			t.Fatalf("Failed to modify file %s: %v", path, err)
+		}
+	}
+	// Wait longer for auto-commit (idle timeout + safety window)
+	time.Sleep(7 * time.Second)
+
+	// Restore entire workspace from first commit
+	restoreCmd := exec.Command(testBinary, "version", "restore", "--mount-point", mountPoint, "--workspace", firstCommit)
+	restoreOutput, err := restoreCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Restore command failed: %v, output: %s", err, string(restoreOutput))
+	}
+
+	// Verify all files were restored
+	for path, expectedContent := range files {
+		fullPath := filepath.Join(mountPoint, path)
+		content, err := os.ReadFile(fullPath)
+		if err != nil {
+			t.Fatalf("Failed to read %s after restore: %v", path, err)
+		}
+		if string(content) != expectedContent {
+			t.Errorf("Expected '%s' in %s after restore, got '%s'", expectedContent, path, string(content))
+		}
+	}
+}
+
+// End-to-End Workflow Tests
+
+func TestSyncWorkflow_WithRollback(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	mountPoint := t.TempDir()
+	srcDir := t.TempDir()
+
+	// Create initial source file
+	srcFile := filepath.Join(srcDir, "test.txt")
+	if err := os.WriteFile(srcFile, []byte("initial"), 0644); err != nil {
+		t.Fatalf("Failed to create source file: %v", err)
+	}
+
+	// Start filesystem
+	cmd := exec.Command(testBinary, mountPoint, srcDir)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Failed to start filesystem: %v", err)
+	}
+	defer func() {
+		gracefulShutdown(cmd, mountPoint, t)
+	}()
+
+	// Wait for filesystem to be ready
+	time.Sleep(100 * time.Millisecond)
+
+	// Step 1: Modify file in mount point
+	mountedFile := filepath.Join(mountPoint, "test.txt")
+	if err := os.WriteFile(mountedFile, []byte("modified"), 0644); err != nil {
+		t.Fatalf("Failed to modify file: %v", err)
+	}
+
+	// Step 2: Sync to source
+	syncCmd := exec.Command(testBinary, "sync", "--mount-point", mountPoint)
+	output, err := syncCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Sync command failed: %v, output: %s", err, string(output))
+	}
+
+	// Extract backup ID
+	backupID := ""
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "Backup created:") {
+			parts := strings.Fields(line)
+			if len(parts) >= 3 {
+				backupID = parts[2]
+				break
+			}
+		}
+	}
+	if backupID == "" {
+		t.Fatal("Failed to extract backup ID from sync output")
+	}
+
+	// Step 3: Verify file was synced
+	content, err := os.ReadFile(srcFile)
+	if err != nil {
+		t.Fatalf("Failed to read source file: %v", err)
+	}
+	if string(content) != "modified" {
+		t.Errorf("Expected 'modified' in source after sync, got '%s'", string(content))
+	}
+
+	// Step 4: Modify source file directly
+	if err := os.WriteFile(srcFile, []byte("modified again"), 0644); err != nil {
+		t.Fatalf("Failed to modify source file: %v", err)
+	}
+
+	// Step 5: Rollback
+	rollbackCmd := exec.Command(testBinary, "sync", "--mount-point", mountPoint, "--rollback", "--backup-id", backupID)
+	rollbackOutput, err := rollbackCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Rollback command failed: %v, output: %s", err, string(rollbackOutput))
+	}
+
+	// Step 6: Verify file was restored
+	content, err = os.ReadFile(srcFile)
+	if err != nil {
+		t.Fatalf("Failed to read source file after rollback: %v", err)
+	}
+	if string(content) != "initial" {
+		t.Errorf("Expected 'initial' after rollback, got '%s'", string(content))
+	}
+}
+
+func TestBackupRestoreWorkflow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	mountPoint := t.TempDir()
+	srcDir := t.TempDir()
+
+	// Create initial source file
+	srcFile := filepath.Join(srcDir, "test.txt")
+	if err := os.WriteFile(srcFile, []byte("initial"), 0644); err != nil {
+		t.Fatalf("Failed to create source file: %v", err)
+	}
+
+	// Start filesystem
+	cmd := exec.Command(testBinary, mountPoint, srcDir)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Failed to start filesystem: %v", err)
+	}
+	defer func() {
+		gracefulShutdown(cmd, mountPoint, t)
+	}()
+
+	// Wait for filesystem to be ready
+	time.Sleep(100 * time.Millisecond)
+
+	// Step 1: Modify file in mount point
+	mountedFile := filepath.Join(mountPoint, "test.txt")
+	if err := os.WriteFile(mountedFile, []byte("modified"), 0644); err != nil {
+		t.Fatalf("Failed to modify file: %v", err)
+	}
+
+	// Step 2: Sync to create backup
+	syncCmd := exec.Command(testBinary, "sync", "--mount-point", mountPoint)
+	output, err := syncCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Sync command failed: %v, output: %s", err, string(output))
+	}
+
+	// Extract backup ID
+	backupID := ""
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "Backup created:") {
+			parts := strings.Fields(line)
+			if len(parts) >= 3 {
+				backupID = parts[2]
+				break
+			}
+		}
+	}
+	if backupID == "" {
+		t.Fatal("Failed to extract backup ID from sync output")
+	}
+
+	// Step 3: Verify file was synced
+	content, err := os.ReadFile(srcFile)
+	if err != nil {
+		t.Fatalf("Failed to read source file: %v", err)
+	}
+	if string(content) != "modified" {
+		t.Errorf("Expected 'modified' in source after sync, got '%s'", string(content))
+	}
+
+	// Step 4: Modify source file directly (simulating external modification)
+	if err := os.WriteFile(srcFile, []byte("external modification"), 0644); err != nil {
+		t.Fatalf("Failed to modify source file: %v", err)
+	}
+
+	// Step 5: Restore from backup
+	rollbackCmd := exec.Command(testBinary, "sync", "--mount-point", mountPoint, "--rollback", "--backup-id", backupID)
+	rollbackOutput, err := rollbackCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Rollback command failed: %v, output: %s", err, string(rollbackOutput))
+	}
+
+	// Step 6: Verify file was restored to backup state
+	// Note: Backup was created BEFORE sync, so it contains "initial", not "modified"
+	// After sync, source was "modified", then we changed it to "external modification"
+	// Restoring from backup should restore to "initial" (the state when backup was created)
+	content, err = os.ReadFile(srcFile)
+	if err != nil {
+		t.Fatalf("Failed to read source file after restore: %v", err)
+	}
+	if string(content) != "initial" {
+		t.Errorf("Expected 'initial' after restore from backup (backup was created before sync), got '%s'", string(content))
+	}
+}

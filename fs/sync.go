@@ -367,11 +367,15 @@ func getFilesToSync(cachePath, sourcePath, filePath, dirPath string) ([]string, 
 			return err
 		}
 
-		// Skip hidden/system directories
+		// Skip hidden/system directories (but not the root of the walk)
 		if info.IsDir() {
+			// Don't skip the root directory we're walking
+			if path == walkBase {
+				return nil
+			}
 			base := filepath.Base(path)
 			if strings.HasPrefix(base, ".") && base != "." && base != ".." {
-				// Skip .gitofs, .root, etc.
+				// Skip .gitofs, .root, etc. (but only if they're subdirectories, not the root)
 				if base == ".gitofs" || base == ".root" || base == ".backup-info" {
 					return filepath.SkipDir
 				}

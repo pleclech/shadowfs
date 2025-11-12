@@ -3,7 +3,7 @@
 
 // CLI integration tests for shadowfs commands (daemon, status, version, etc.)
 // These tests verify CLI command functionality, not filesystem operations.
-// For filesystem integration tests, see ../integration_test.go
+// For filesystem integration tests, see ../filesystem_integration_test.go
 package main
 
 import (
@@ -11,8 +11,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	shadowfs "github.com/pleclech/shadowfs/fs"
 	"github.com/pleclech/shadowfs/fs/cache"
 )
 
@@ -306,6 +308,279 @@ func TestCLICommands(t *testing.T) {
 	output, err = cmd.CombinedOutput()
 	if err != nil {
 		t.Logf("info command output: %s, error: %v (may be expected)", string(output), err)
+	}
+}
+
+// Backups CLI Integration Tests
+
+func TestBackupsList(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	// Find shadowfs binary
+	binary := os.Getenv("SHADOWFS_BINARY")
+	if binary == "" {
+		binary = "./shadowfs"
+		if _, err := os.Stat(binary); err != nil {
+			t.Skip("shadowfs binary not found, skipping CLI tests")
+		}
+	}
+
+	tempDir, err := os.MkdirTemp("", "backups-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	mountPoint := filepath.Join(tempDir, "mount")
+	sourceDir := filepath.Join(tempDir, "source")
+
+	if err := os.MkdirAll(mountPoint, 0755); err != nil {
+		t.Fatalf("Failed to create mount point: %v", err)
+	}
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatalf("Failed to create source dir: %v", err)
+	}
+
+	// Create a test file in source
+	testFile := filepath.Join(sourceDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("test content"), 0644); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Create a backup using the API (simulating sync operation)
+	oldEnv := os.Getenv("SHADOWFS_BACKUP_DIR")
+	defer os.Setenv("SHADOWFS_BACKUP_DIR", oldEnv)
+	backupBaseDir := filepath.Join(tempDir, "backups")
+	os.Setenv("SHADOWFS_BACKUP_DIR", backupBaseDir)
+
+	backupID, _, err := shadowfs.CreateBackup(sourceDir, mountPoint)
+	if err != nil {
+		t.Fatalf("Failed to create backup: %v", err)
+	}
+	if backupID == "" {
+		t.Fatal("Backup ID should not be empty")
+	}
+
+	// Test backups list command
+	cmd := exec.Command(binary, "backups", "list")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("backups list command failed: %v, output: %s", err, string(output))
+	}
+
+	// Verify output contains backup information
+	outputStr := string(output)
+	if !strings.Contains(outputStr, backupID[:20]) {
+		t.Errorf("Expected backup ID in output, got: %s", outputStr)
+	}
+	if !strings.Contains(outputStr, "test.txt") || !strings.Contains(outputStr, sourceDir) {
+		t.Logf("backups list output: %s", outputStr)
+		// Don't fail - the output format might vary
+	}
+}
+
+func TestBackupsInfo(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	// Find shadowfs binary
+	binary := os.Getenv("SHADOWFS_BINARY")
+	if binary == "" {
+		binary = "./shadowfs"
+		if _, err := os.Stat(binary); err != nil {
+			t.Skip("shadowfs binary not found, skipping CLI tests")
+		}
+	}
+
+	tempDir, err := os.MkdirTemp("", "backups-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	mountPoint := filepath.Join(tempDir, "mount")
+	sourceDir := filepath.Join(tempDir, "source")
+
+	if err := os.MkdirAll(mountPoint, 0755); err != nil {
+		t.Fatalf("Failed to create mount point: %v", err)
+	}
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatalf("Failed to create source dir: %v", err)
+	}
+
+	// Create a test file in source
+	testFile := filepath.Join(sourceDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("test content"), 0644); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Create a backup using the API
+	oldEnv := os.Getenv("SHADOWFS_BACKUP_DIR")
+	defer os.Setenv("SHADOWFS_BACKUP_DIR", oldEnv)
+	backupBaseDir := filepath.Join(tempDir, "backups")
+	os.Setenv("SHADOWFS_BACKUP_DIR", backupBaseDir)
+
+	backupID, _, err := shadowfs.CreateBackup(sourceDir, mountPoint)
+	if err != nil {
+		t.Fatalf("Failed to create backup: %v", err)
+	}
+
+	// Test backups info command
+	cmd := exec.Command(binary, "backups", "info", backupID)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("backups info command failed: %v, output: %s", err, string(output))
+	}
+
+	// Verify output contains backup information
+	outputStr := string(output)
+	if !strings.Contains(outputStr, backupID) {
+		t.Errorf("Expected backup ID in output, got: %s", outputStr)
+	}
+	if !strings.Contains(outputStr, sourceDir) {
+		t.Errorf("Expected source path in output, got: %s", outputStr)
+	}
+}
+
+func TestBackupsDelete(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	// Find shadowfs binary
+	binary := os.Getenv("SHADOWFS_BINARY")
+	if binary == "" {
+		binary = "./shadowfs"
+		if _, err := os.Stat(binary); err != nil {
+			t.Skip("shadowfs binary not found, skipping CLI tests")
+		}
+	}
+
+	tempDir, err := os.MkdirTemp("", "backups-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	mountPoint := filepath.Join(tempDir, "mount")
+	sourceDir := filepath.Join(tempDir, "source")
+
+	if err := os.MkdirAll(mountPoint, 0755); err != nil {
+		t.Fatalf("Failed to create mount point: %v", err)
+	}
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatalf("Failed to create source dir: %v", err)
+	}
+
+	// Create a test file in source
+	testFile := filepath.Join(sourceDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("test content"), 0644); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Create a backup using the API
+	oldEnv := os.Getenv("SHADOWFS_BACKUP_DIR")
+	defer os.Setenv("SHADOWFS_BACKUP_DIR", oldEnv)
+	backupBaseDir := filepath.Join(tempDir, "backups")
+	os.Setenv("SHADOWFS_BACKUP_DIR", backupBaseDir)
+
+	backupID, backupDir, err := shadowfs.CreateBackup(sourceDir, mountPoint)
+	if err != nil {
+		t.Fatalf("Failed to create backup: %v", err)
+	}
+
+	// Verify backup exists
+	if _, err := os.Stat(backupDir); err != nil {
+		t.Fatalf("Backup directory should exist: %v", err)
+	}
+
+	// Test backups delete command with --force flag
+	cmd := exec.Command(binary, "backups", "delete", "--force", backupID)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("backups delete command failed: %v, output: %s", err, string(output))
+	}
+
+	// Verify backup was deleted
+	if _, err := os.Stat(backupDir); err == nil {
+		t.Error("Backup directory should be deleted")
+	}
+
+	// Verify output mentions deletion
+	outputStr := string(output)
+	if !strings.Contains(outputStr, backupID) {
+		t.Errorf("Expected backup ID in delete output, got: %s", outputStr)
+	}
+}
+
+func TestBackupsCleanup(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	// Find shadowfs binary
+	binary := os.Getenv("SHADOWFS_BINARY")
+	if binary == "" {
+		binary = "./shadowfs"
+		if _, err := os.Stat(binary); err != nil {
+			t.Skip("shadowfs binary not found, skipping CLI tests")
+		}
+	}
+
+	tempDir, err := os.MkdirTemp("", "backups-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	mountPoint := filepath.Join(tempDir, "mount")
+	sourceDir := filepath.Join(tempDir, "source")
+
+	if err := os.MkdirAll(mountPoint, 0755); err != nil {
+		t.Fatalf("Failed to create mount point: %v", err)
+	}
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatalf("Failed to create source dir: %v", err)
+	}
+
+	// Create a test file in source
+	testFile := filepath.Join(sourceDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("test content"), 0644); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Create a backup using the API
+	oldEnv := os.Getenv("SHADOWFS_BACKUP_DIR")
+	defer os.Setenv("SHADOWFS_BACKUP_DIR", oldEnv)
+	backupBaseDir := filepath.Join(tempDir, "backups")
+	os.Setenv("SHADOWFS_BACKUP_DIR", backupBaseDir)
+
+	backupID, _, err := shadowfs.CreateBackup(sourceDir, mountPoint)
+	if err != nil {
+		t.Fatalf("Failed to create backup: %v", err)
+	}
+
+	// Test backups cleanup command with --force flag and --older-than 0 (should delete all)
+	cmd := exec.Command(binary, "backups", "cleanup", "--older-than", "0", "--force")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("backups cleanup command failed: %v, output: %s", err, string(output))
+	}
+
+	// Verify backup was deleted
+	_, err = shadowfs.ReadBackupInfo(backupID)
+	if err == nil {
+		t.Error("Backup should be deleted after cleanup")
+	}
+
+	// Verify output mentions cleanup
+	outputStr := string(output)
+	if !strings.Contains(outputStr, "deleted") && !strings.Contains(outputStr, "Successfully") {
+		t.Logf("backups cleanup output: %s", outputStr)
+		// Don't fail - output format might vary
 	}
 }
 
