@@ -295,15 +295,18 @@ sudo ./shadowfs -auto-git /mnt/workspace /path/to/source
 vim /mnt/workspace/file1.txt
 vim /mnt/workspace/file2.txt
 
-# Check git history
+# Check git history using version command (recommended)
+shadowfs version list --mount-point /mnt/workspace
+
+# Or check git history directly
 cd /mnt/workspace
-git --git-dir=.gitofs log --oneline
+git --git-dir=.gitofs/.git log --oneline
 
 # View changes
-git --git-dir=.gitofs diff HEAD~1
+git --git-dir=.gitofs/.git diff HEAD~1
 
 # Revert to previous version if needed
-git --git-dir=.gitofs checkout HEAD~1 -- file1.txt
+git --git-dir=.gitofs/.git checkout HEAD~1 -- file1.txt
 
 # Unmount - all pending changes are committed automatically
 sudo umount /mnt/workspace
@@ -391,6 +394,8 @@ sudo ./shadowfs -debug -auto-git /home/user/mount /home/user/source
 - Change detection (skips commits for unchanged files)
 - Non-blocking async operations (doesn't slow down filesystem)
 - Git repository stored in `.gitofs/` directory (separate from source)
+- Concise commit messages showing file count (e.g., "Auto-commit: 3 files")
+- File names shown in `version list` output for easy identification
 
 ## Important Notes
 
@@ -470,6 +475,16 @@ The filesystem includes optional automatic Git versioning to track all file chan
 3. **Change Detection**: Only files with actual changes are committed
 4. **Async Operations**: Git operations run in background, not blocking filesystem operations
 5. **Commit-on-Unmount**: All pending changes are committed before unmounting to prevent data loss
+6. **Concise Commit Messages**: Commit messages show file count (e.g., "Auto-commit: 3 files") for scalability
+7. **File Visibility**: The `version list` command shows changed files by default using `--name-only`
+
+### Commit Message Format
+
+Commit messages are designed to be concise and scalable:
+- **Single file**: `Auto-commit: 1 file`
+- **Multiple files**: `Auto-commit: N files` (where N is the count)
+
+File names are shown separately in the `version list` output, not in the commit message, allowing the system to scale to any number of files without cluttering commit messages.
 
 ### Architecture
 
@@ -513,9 +528,12 @@ vim /mnt/overlay/file1.txt
 vim /mnt/overlay/file2.txt
 
 # Files are automatically committed after 30 seconds of inactivity
-# Check git history
+# Check git history using version command (recommended)
+shadowfs version list --mount-point /mnt/overlay
+
+# Or check git history directly
 cd /mnt/overlay
-git --git-dir=.gitofs log --oneline
+git --git-dir=.gitofs/.git log --oneline
 
 # Unmount - all pending changes are committed automatically
 sudo umount /mnt/overlay
@@ -653,9 +671,19 @@ The filesystem includes comprehensive version management commands for viewing hi
 
 ### Version Commands
 
+The `version list` command shows commit history with file names by default, making it easy to see what changed in each commit:
+
 ```bash
-# List version history
+# List version history (shows file names by default)
 shadowfs version list --mount-point /mnt/overlay
+
+# Example output:
+# 501a569 2025-11-12 Auto-commit: 3 files
+# 	file1.txt
+# 	file2.go
+# 	readme.md
+# 8b2c3d4 2025-11-12 Auto-commit: 1 file
+# 	config.json
 
 # List history for specific file
 shadowfs version list --mount-point /mnt/overlay --path file.txt
@@ -689,7 +717,20 @@ shadowfs version restore --mount-point /mnt/overlay <commit>
 shadowfs version log --mount-point /mnt/overlay
 shadowfs version log --mount-point /mnt/overlay --path "*.txt"
 shadowfs version log --mount-point /mnt/overlay --path "*.txt" --stat --graph
+
+# Use --oneline for compact output without file lists
+shadowfs version log --mount-point /mnt/overlay --oneline
 ```
+
+### Empty Repository Handling
+
+If you run `version list` on a repository with no commits yet, you'll see a friendly message:
+
+```
+No commits found yet. Make some changes and they will be automatically committed.
+```
+
+This replaces the technical git error message for a better user experience.
 
 ### Pattern Matching
 
@@ -1201,7 +1242,7 @@ sudo ./shadowfs -debug /mount /source
 du -sh ~/.shadowfs/
 
 # Check git repository size (if using auto-versioning)
-du -sh ~/.shadowfs/*/.gitofs/
+du -sh ~/.shadowfs/*/.gitofs/.git/
 ```
 
 #### Git Auto-Versioning Issues
@@ -1211,11 +1252,14 @@ du -sh ~/.shadowfs/*/.gitofs/
 which git
 
 # Verify git repository was created
-ls -la <mountpoint>/.gitofs/
+ls -la <mountpoint>/.gitofs/.git/
 
-# Check git logs
+# Check git logs using version command (recommended - shows file names)
+shadowfs version list --mount-point <mountpoint>
+
+# Or check git logs directly
 cd <mountpoint>
-git --git-dir=.gitofs log --oneline
+git --git-dir=.gitofs/.git log --oneline
 
 # If commits aren't happening, check idle timeout
 # Increase timeout if files are being edited frequently
