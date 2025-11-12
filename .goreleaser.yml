@@ -1,15 +1,17 @@
 # GoReleaser configuration for ShadowFS
-# Linux-only FUSE filesystem
+# Linux (fully supported) and macOS (experimental/untested) FUSE filesystem
 #
 # NOTE: CGO is REQUIRED because go-fuse/v2 depends on libfuse (C library).
 # For cross-compilation, ensure proper C cross-compiler toolchains are installed.
+# macOS builds require macOS SDK (typically only available on macOS hosts).
 # See: https://goreleaser.com/cookbooks/cgo-and-crosscompiling/
 
 project_name: shadowfs
 
 # Build configuration
 builds:
-  - id: shadowfs
+  # Linux builds (fully supported)
+  - id: shadowfs-linux
     main: ./cmd/shadowfs
     binary: shadowfs
     goos:
@@ -31,12 +33,33 @@ builds:
     env:
       - CGO_ENABLED=1
 
+  # macOS builds (experimental/untested)
+  # NOTE: Requires macOS SDK - typically only builds on macOS hosts
+  # Cross-compilation from Linux to macOS with CGO is complex and may not work
+  - id: shadowfs-darwin
+    main: ./cmd/shadowfs
+    binary: shadowfs
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    env:
+      - CGO_ENABLED=1
+    skip: false  # Set to true to skip macOS builds if SDK unavailable
+
 # Archive configuration
 archives:
   - id: default
     format: tar.gz
     format_overrides:
       - goos: linux
+        format: tar.gz
+      - goos: darwin
         format: tar.gz
     files:
       - LICENSE
@@ -57,7 +80,9 @@ release:
   header: |
     ## ShadowFS {{ .Tag }}
     
-    A FUSE-based versioned overlay filesystem for Linux.
+    A FUSE-based versioned overlay filesystem for Linux (fully supported) and macOS (experimental/untested).
+    
+    **Note**: macOS builds are experimental and untested. Use at your own risk.
     
     ### Changes
   footer: |

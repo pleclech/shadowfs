@@ -1,7 +1,9 @@
-//go:build !linux && !darwin
-// +build !linux,!darwin
+//go:build darwin
+// +build darwin
 
 package fs
+
+// UNTESTED: macOS implementation - requires testing on macOS hardware
 
 import (
 	"syscall"
@@ -10,7 +12,7 @@ import (
 )
 
 // CopyFile copies a file from source to destination using portable read/write method
-// This is the non-Linux implementation that uses the fallback method
+// macOS doesn't have syscall.Sendfile, so we use the fallback method
 func (h *ShadowNodeHelpers) CopyFile(srcPath, destPath string) syscall.Errno {
 	srcFd, err := syscall.Open(srcPath, syscall.O_RDONLY, 0)
 	if err != nil {
@@ -24,7 +26,7 @@ func (h *ShadowNodeHelpers) CopyFile(srcPath, destPath string) syscall.Errno {
 	}
 	defer syscall.Close(destFd)
 
-	// Use fallback method for non-Linux platforms
+	// Use fallback method for macOS (no sendfile support)
 	return h.copyFileFallback(srcFd, destFd)
 }
 
