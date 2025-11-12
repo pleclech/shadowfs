@@ -17,6 +17,7 @@ A FUSE-based versioned overlay filesystem that provides versioning and caching c
 - [Sync to Source](#sync-to-source)
 - [Version Management](#version-management)
 - [Daemon Management](#daemon-management)
+- [Mount Status and Information](#mount-status-and-information)
 - [Security](#security)
 - [Development](#development)
   - [Project Structure](#project-structure)
@@ -38,6 +39,7 @@ A FUSE-based versioned overlay filesystem that provides versioning and caching c
 - **Overlay Architecture**: Shadow/caching overlay filesystem using FUSE
 - **Git Auto-Versioning**: Automatic Git commits with idle-based commit strategy
 - **Daemon Mode**: Run filesystem in background with process management
+- **Mount Status**: List and inspect active mounts with detailed statistics
 - **Copy-on-Write**: Files copied to cache only on first write for efficiency
 - **Session Persistence**: Maintains cache across mount/unmount cycles
 - **Performance Optimized**: Buffer pools, async operations, no reflection overhead
@@ -51,15 +53,27 @@ A FUSE-based versioned overlay filesystem that provides versioning and caching c
 
 #### Runtime Requirements (for using the binary)
 
-- **Linux**: Required for FUSE and syscalls
-- **FUSE library**: Runtime library (`libfuse.so`) must be installed
-  - Ubuntu/Debian: `sudo apt-get install fuse3` (or `fuse` for older versions)
-  - CentOS/RHEL: `sudo yum install fuse3` (or `fuse` for older versions)
-- **Root/sudo privileges**: Required for mounting filesystems
-- **Extended Attributes (xattr) support**: Required for file deletion tracking
-  - Supported filesystems: ext4, xfs, btrfs (fully supported)
-  - Most modern Linux filesystems support xattr
-  - **Not supported**: FAT32, some network filesystems without xattr support
+- **Linux**: Fully supported and tested
+  - **FUSE library**: Runtime library (`libfuse.so`) must be installed
+    - Ubuntu/Debian: `sudo apt-get install fuse3` (or `fuse` for older versions)
+    - CentOS/RHEL: `sudo yum install fuse3` (or `fuse` for older versions)
+  - **Root/sudo privileges**: Required for mounting filesystems
+  - **Extended Attributes (xattr) support**: Required for file deletion tracking
+    - Supported filesystems: ext4, xfs, btrfs (fully supported)
+    - Most modern Linux filesystems support xattr
+    - **Not supported**: FAT32, some network filesystems without xattr support
+
+- **macOS**: **EXPERIMENTAL/UNTESTED** - Code compiles but requires testing on macOS hardware
+  - **macFUSE**: Must be installed (download from https://osxfuse.github.io/ or https://github.com/macfuse/macfuse)
+  - **Extended Attributes**: macOS supports extended attributes natively
+  - **Git**: Required for version management commands
+  - **Note**: This implementation has not been tested on macOS hardware. Use at your own risk and please report any issues.
+
+- **Windows**: Use via WSL (Windows Subsystem for Linux)
+  - The Linux version works perfectly in WSL environments
+  - Install WSL2 and follow Linux installation instructions
+  - Native Windows support is not currently implemented
+
 - **Git**: Required for version management commands (`version`, `checkpoint`, `sync`)
   - Used for viewing history, creating checkpoints, and syncing operations
   - Must be installed and available in PATH
@@ -68,8 +82,10 @@ A FUSE-based versioned overlay filesystem that provides versioning and caching c
 
 - **Go 1.19 or later**: Required to compile the project
 - **FUSE development headers**: Required for building
-  - Ubuntu/Debian: `sudo apt-get install libfuse-dev`
-  - CentOS/RHEL: `sudo yum install fuse-devel`
+  - **Linux**: 
+    - Ubuntu/Debian: `sudo apt-get install libfuse-dev`
+    - CentOS/RHEL: `sudo yum install fuse-devel`
+  - **macOS**: macFUSE development headers (included with macFUSE installation)
 - **Git**: Required for cloning the repository and version control
 
 ### Installation
@@ -90,6 +106,7 @@ A FUSE-based versioned overlay filesystem that provides versioning and caching c
 
 #### Building from Source
 
+**Linux:**
 ```bash
 # Install development dependencies
 # Ubuntu/Debian
@@ -105,6 +122,27 @@ cd shadowfs
 # Build the binary
 go build -o shadowfs ./cmd/shadowfs
 ```
+
+**macOS (EXPERIMENTAL/UNTESTED):**
+```bash
+# Install macFUSE (includes development headers)
+# Download from https://osxfuse.github.io/ or https://github.com/macfuse/macfuse
+# Or use Homebrew:
+brew install macfuse
+
+# Clone the repository
+git clone https://github.com/pleclech/shadowfs.git
+cd shadowfs
+
+# Build for macOS
+go build -o shadowfs ./cmd/shadowfs
+
+# Or cross-compile from Linux:
+GOOS=darwin GOARCH=amd64 go build -o shadowfs-darwin-amd64 ./cmd/shadowfs
+GOOS=darwin GOARCH=arm64 go build -o shadowfs-darwin-arm64 ./cmd/shadowfs
+```
+
+**Note**: macOS support is experimental and untested. The code compiles but requires testing on macOS hardware.
 
 ### Basic Usage
 
@@ -129,6 +167,12 @@ sudo umount /home/user/mount
 
 # For daemon mode:
 shadowfs stop --mount-point /home/user/mount
+
+# List all active mounts
+shadowfs list
+
+# Get detailed information about a mount
+shadowfs info --mount-point /home/user/mount
 ```
 
 ## Complete Workflow
@@ -848,7 +892,10 @@ shadowfs stop --mount-point /mnt/overlay
 PID files are stored in `~/.shadowfs/daemons/` directory:
 
 ```bash
-# List all running daemons
+# List all active mounts (recommended method)
+shadowfs list
+
+# Alternative: List PID files directly
 ls ~/.shadowfs/daemons/
 
 # View PID file contents (JSON format)
@@ -890,6 +937,133 @@ kill -TERM <pid>
 
 # Clean up stale PID file manually
 rm ~/.shadowfs/daemons/<mount-id>.pid
+```
+
+## Mount Status and Information
+
+ShadowFS provides commands to list and inspect active mounts, making it easy to monitor your filesystem mounts and gather detailed statistics.
+
+### Listing Active Mounts
+
+The `list` command shows all active mounts (both foreground and daemon processes):
+
+```bash
+# List all active mounts
+shadowfs list
+```
+
+**Output Format:**
+```
+Mount Point                  Source Directory              Status     PID      Started
+/mnt/overlay                /path/to/source              daemon     12345    2025-01-01 12:00:00
+/home/user/mount            /home/user/source            active     -        -
+```
+
+**Status Values:**
+- `active`: Foreground mount (running in terminal)
+- `daemon`: Background daemon process (running in background)
+- `stale`: Process not running but PID file exists (needs cleanup)
+
+**Use Cases:**
+- Quick overview of all active mounts
+- Identify daemon processes and their PIDs
+- Find stale mounts that need cleanup
+- Verify mount status before operations
+
+### Getting Detailed Mount Information
+
+The `info` command provides detailed statistics for a specific mount point:
+
+```bash
+# Get detailed information for a mount point
+shadowfs info --mount-point /mnt/overlay
+```
+
+**Output Includes:**
+
+1. **Mount Information:**
+   - Mount point path
+   - Source directory
+   - Cache directory location
+   - Status (active/daemon/stale)
+   - Process ID (for daemon processes)
+   - Start time
+
+2. **Cache Statistics:**
+   - Total cache size (human-readable format)
+   - File count
+   - Directory count
+
+3. **Git Status** (if enabled):
+   - Whether Git auto-versioning is enabled
+   - Last commit hash and timestamp
+   - Last commit message
+   - List of uncommitted files (if any)
+
+**Example Output:**
+```
+Mount Point: /mnt/overlay
+Source Directory: /path/to/source
+Cache Directory: /home/user/.shadowfs/<mount-id>
+Status: daemon
+PID: 12345
+Started: 2025-01-01 12:00:00
+
+Cache Statistics:
+  Size: 125.3 MB
+  Files: 1,234
+  Directories: 56
+
+Git Status:
+  Enabled: Yes
+  Last Commit: 501a569 (2025-01-01 12:30:00)
+  Message: Auto-commit: Modified 3 files
+  Uncommitted Changes: 2 file(s)
+    - config.txt
+    - data.json
+```
+
+**Use Cases:**
+- Check cache size and file counts
+- Verify Git status and recent commits
+- Identify uncommitted changes
+- Troubleshoot mount issues
+- Monitor mount health and status
+
+### Integration with Other Commands
+
+The status commands work seamlessly with other ShadowFS operations:
+
+```bash
+# List all mounts
+shadowfs list
+
+# Get info for a specific mount
+shadowfs info --mount-point /mnt/overlay
+
+# Use mount point for other commands
+shadowfs version list --mount-point /mnt/overlay
+shadowfs checkpoint --mount-point /mnt/overlay
+shadowfs sync --mount-point /mnt/overlay --dry-run
+
+# Stop daemon if needed
+shadowfs stop --mount-point /mnt/overlay
+```
+
+### Troubleshooting with Status Commands
+
+```bash
+# Check if mount is active
+shadowfs list | grep /mnt/overlay
+
+# Verify mount details
+shadowfs info --mount-point /mnt/overlay
+
+# Check for uncommitted changes
+shadowfs info --mount-point /mnt/overlay | grep "Uncommitted"
+
+# Identify stale mounts
+shadowfs list | grep stale
 ```
 
 ## Security
