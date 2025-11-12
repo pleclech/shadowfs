@@ -36,8 +36,6 @@ archives:
     format_overrides:
       - goos: linux
         format: tar.gz
-      - goos: darwin
-        format: tar.gz
     files:
       - LICENSE
       - README.md

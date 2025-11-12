@@ -214,7 +214,9 @@ shadowfs version diff --mount-point /mnt/overlay HEAD~1 HEAD --path "*.txt"
 # Restore a file to a previous version (if needed)
 shadowfs version restore --mount-point /mnt/overlay --file file1.txt <commit-hash>
 
-# Or restore entire workspace to a previous state
+# Or restore entire workspace to a previous state (--workspace flag is optional)
+shadowfs version restore --mount-point /mnt/overlay --workspace <commit-hash>
+# Or simply (workspace is the default):
 shadowfs version restore --mount-point /mnt/overlay <commit-hash>
 
 # Create a manual checkpoint before major changes
@@ -329,13 +331,23 @@ sudo umount /mnt/overlay
 
 #### Mounting Read-Only Source Directory
 
+`shadowfs` allows you to overlay a read-only source directory (e.g., a mounted CD-ROM, an immutable snapshot) with a writable layer.
+All modifications (creations, edits, deletions) made through the `shadowfs` mount point will be stored in its cache, leaving the original read-only source completely untouched.
+
+**Important**: Since the source is read-only, you **cannot sync** changes back to it using the `shadowfs sync` command. All changes will effectively exist only within the `shadowfs` cache and its Git history.
+
 ```bash
-# Mount a read-only source directory (e.g., from a CD or read-only filesystem)
+# Example: Mount a read-only source directory (e.g., from a CD-ROM or an immutable snapshot)
 sudo mount -o ro /dev/sr0 /mnt/cdrom
 sudo ./shadowfs /mnt/overlay /mnt/cdrom
 
-# Now you can modify files in /mnt/overlay without affecting the CD
+# Now you can modify files in /mnt/overlay. These changes are stored in shadowfs's cache
+# and do not affect the original read-only /mnt/cdrom.
 vim /mnt/overlay/config.txt
+
+# Attempting to sync will fail if the source (/mnt/cdrom) is truly read-only.
+# All changes will remain in the shadowfs cache and its Git history.
+./shadowfs sync --mount-point /mnt/overlay
 ```
 
 #### Git Auto-Versioning Workflow
@@ -665,13 +677,30 @@ shadowfs sync --mount-point /mnt/overlay --dry-run
 # Sync without backup (dangerous - not recommended)
 shadowfs sync --mount-point /mnt/overlay --no-backup
 
-# Force sync (ignore conflicts)
+# Force sync (ignore conflicts and warnings)
 shadowfs sync --mount-point /mnt/overlay --force
 
 # Sync specific file or directory
 shadowfs sync --mount-point /mnt/overlay --file path/to/file.txt
 shadowfs sync --mount-point /mnt/overlay --dir path/to/directory
 ```
+
+**Options:**
+- `--mount-point`: Mount point path (required)
+- `--dry-run`: Preview changes without actually syncing
+- `--backup`: Create backup before syncing (default: true)
+- `--no-backup`: Skip backup creation (dangerous)
+- `--force`: Force sync even if conflicts detected (use with caution)
+- `--file`: Sync only specific file
+- `--dir`: Sync only specific directory tree
+- `--rollback`: Rollback to a previous backup (requires `--backup-id`)
+- `--backup-id`: Backup ID for rollback operation
+
+**What gets synced:**
+- All modified files in cache (copy-on-write files)
+- All new files created in cache
+- All deleted files (removed from source)
+- Only files that differ from source are synced
 
 ### Rollback
 
@@ -693,13 +722,13 @@ shadowfs backups list
 # List backups for specific mount point
 shadowfs backups list --mount-point /mnt/overlay
 
-# Show backup details
+# Show backup details (mount point, timestamp, file count, size)
 shadowfs backups info <backup-id>
 
-# Delete a backup
+# Delete a backup (with confirmation prompt)
 shadowfs backups delete <backup-id>
 
-# Delete without confirmation
+# Delete without confirmation prompt
 shadowfs backups delete --force <backup-id>
 
 # Cleanup old backups (older than 30 days by default)
@@ -711,6 +740,25 @@ shadowfs backups cleanup --older-than 7
 # Cleanup for specific mount point
 shadowfs backups cleanup --mount-point /mnt/overlay --older-than 7
 ```
+
+**Backup Commands:**
+
+1. **`backups list`**: List all backups or backups for a specific mount point
+   - Shows backup ID, mount point, timestamp, and file count
+   - Use `--mount-point` to filter by mount point
+
+2. **`backups info <backup-id>`**: Show detailed information about a backup
+   - Shows mount point, source directory, timestamp, file count, and total size
+   - Backup ID format: `YYYYMMDD-HHMMSS-hexstring`
+
+3. **`backups delete <backup-id>`**: Delete a specific backup
+   - Prompts for confirmation unless `--force` is used
+   - Use `--force` to skip confirmation prompt
+
+4. **`backups cleanup`**: Remove old backups
+   - Default: removes backups older than 30 days
+   - Use `--older-than <days>` to specify custom age threshold
+   - Use `--mount-point` to cleanup backups for specific mount point only
 
 ### Backup Storage
 
@@ -765,6 +813,8 @@ The filesystem includes comprehensive version management commands for viewing hi
 
 ### Version Commands
 
+#### version list
+
 The `version list` command shows commit history with file names by default, making it easy to see what changed in each commit:
 
 ```bash
@@ -792,29 +842,115 @@ shadowfs version list --mount-point /mnt/overlay --path "src/**/*.go"
 # List history for multiple patterns
 shadowfs version list --mount-point /mnt/overlay --path "*.txt,*.go"
 
-# Show diff between versions
-shadowfs version diff --mount-point /mnt/overlay <commit1> <commit2>
-# Or diff against working tree
+# Limit number of commits shown
+shadowfs version list --mount-point /mnt/overlay --limit 10
+```
+
+**Options:**
+- `--mount-point`: Mount point path (required)
+- `--path`: Filter by file/directory path or glob pattern (comma-separated for multiple patterns)
+- `--limit`: Limit number of commits shown (0 = no limit)
+
+#### version diff
+
+The `version diff` command shows differences between versions or uncommitted changes:
+
+```bash
+# Show uncommitted changes (no commit arguments)
+shadowfs version diff --mount-point /mnt/overlay
+
+# Diff against working tree (single commit)
 shadowfs version diff --mount-point /mnt/overlay HEAD
+
+# Show diff between two commits
+shadowfs version diff --mount-point /mnt/overlay <commit1> <commit2>
+shadowfs version diff --mount-point /mnt/overlay HEAD~1 HEAD
 
 # Show diff for specific file or pattern
 shadowfs version diff --mount-point /mnt/overlay HEAD~1 HEAD --path "*.txt"
 shadowfs version diff --mount-point /mnt/overlay HEAD~1 HEAD --path "src/**/*.go"
 
-# Restore file to previous version
+# Show statistics only (file names and change counts)
+shadowfs version diff --mount-point /mnt/overlay HEAD~1 HEAD --stat
+```
+
+**Options:**
+- `--mount-point`: Mount point path (required)
+- `--path`: Filter by file/directory path or glob pattern
+- `--stat`: Show statistics only (file names and change counts, no actual diff)
+
+**Behavior:**
+- **No commits**: Shows uncommitted changes in working tree
+- **One commit**: Shows diff between that commit and current working tree
+- **Two commits**: Shows diff between the two commits
+
+#### version restore
+
+The `version restore` command restores files, directories, or the entire workspace to a previous version:
+
+```bash
+# Restore single file to previous version
 shadowfs version restore --mount-point /mnt/overlay --file path/to/file.txt <commit>
 
-# Restore entire workspace
+# Restore directory tree to previous version
+shadowfs version restore --mount-point /mnt/overlay --dir path/to/directory <commit>
+
+# Restore entire workspace (--workspace flag is optional, defaults to workspace)
+shadowfs version restore --mount-point /mnt/overlay --workspace <commit>
+# Or simply (workspace is the default):
 shadowfs version restore --mount-point /mnt/overlay <commit>
 
-# Enhanced version log with patterns
+# Force restore even if there are uncommitted changes
+shadowfs version restore --mount-point /mnt/overlay --file file.txt <commit> --force
+```
+
+**Options:**
+- `--mount-point`: Mount point path (required)
+- `--file`: Restore single file
+- `--dir`: Restore directory tree
+- `--workspace`: Restore entire workspace (default if no file/dir specified)
+- `--force`: Overwrite uncommitted changes (use with caution)
+
+**Note**: If neither `--file`, `--dir`, nor `--workspace` is specified, the entire workspace is restored by default.
+
+#### version log
+
+The `version log` command provides enhanced version history with more formatting options than `version list`:
+
+```bash
+# Basic log (similar to version list but with more options)
 shadowfs version log --mount-point /mnt/overlay
+
+# Filter by pattern
 shadowfs version log --mount-point /mnt/overlay --path "*.txt"
+
+# Show commit graph (visual representation of branches/merges)
+shadowfs version log --mount-point /mnt/overlay --graph
+
+# Show file statistics (lines added/removed per file)
+shadowfs version log --mount-point /mnt/overlay --stat
+
+# Combine options
 shadowfs version log --mount-point /mnt/overlay --path "*.txt" --stat --graph
 
-# Use --oneline for compact output without file lists
+# Compact one-line output (no file lists)
 shadowfs version log --mount-point /mnt/overlay --oneline
 ```
+
+**Options:**
+- `--mount-point`: Mount point path (required)
+- `--path`: Filter by file/directory path or glob pattern
+- `--oneline`: One line per commit (compact output without file lists)
+- `--graph`: Show commit graph (visual representation)
+- `--stat`: Show file statistics (lines added/removed)
+
+**When to use `version log` vs `version list`:**
+- Use `version list` for quick overview with file names (default behavior)
+- Use `version log` when you need:
+  - Visual commit graph (`--graph`)
+  - File change statistics (`--stat`)
+  - Compact one-line output (`--oneline`)
+  - More Git log formatting options
 
 ### Empty Repository Handling
 
@@ -838,7 +974,7 @@ Patterns are expanded relative to the cache workspace root. If a pattern matches
 
 ### Checkpoint Command
 
-Create manual checkpoints for known-good states:
+Create manual checkpoints for known-good states. Unlike auto-commits, checkpoints are created immediately when you run the command:
 
 ```bash
 # Create checkpoint for current state (all changed files)
@@ -848,7 +984,20 @@ shadowfs checkpoint --mount-point /mnt/overlay
 shadowfs checkpoint --mount-point /mnt/overlay --file path/to/file.txt
 ```
 
-Checkpoints are automatically tagged in Git for easy identification.
+**Options:**
+- `--mount-point`: Mount point path (required)
+- `--file`: Create checkpoint for specific file (optional, defaults to all changed files)
+
+**Behavior:**
+- If no `--file` is specified, all files with uncommitted changes are checkpointed
+- If no uncommitted changes exist, the command reports "No uncommitted changes found"
+- Checkpoints are created immediately (unlike auto-commits which wait for idle period)
+- Checkpoints use commit message "Manual checkpoint"
+
+**Use Cases:**
+- Create a checkpoint before making risky changes
+- Mark a known-good state for easy restoration
+- Create checkpoints at project milestones
 
 ## Daemon Management
 
@@ -1190,13 +1339,13 @@ go build -ldflags="-s -w" -o shadowfs ./cmd/shadowfs
 
 ### Releases
 
-ShadowFS uses [GoReleaser](https://goreleaser.com) for automated releases. The project is configured to build for multiple Linux architectures (amd64, arm64, arm, 386) and publish releases to GitHub.
+ShadowFS uses [GoReleaser](https://goreleaser.com) for automated releases. The project is configured to build for Linux amd64 architecture and publish releases to GitHub.
 
 #### Prerequisites
 
 - GoReleaser installed: `go install github.com/goreleaser/goreleaser@latest`
 - GitHub Personal Access Token with `repo` scope (for local releases)
-- For cross-compilation: Install cross-compiler toolchains (optional, for ARM builds)
+- For cross-compilation: Install cross-compiler toolchains (optional, for future ARM builds)
 
 #### Configuration
 
@@ -1235,7 +1384,7 @@ goreleaser release
 
 The project includes a GitHub Actions workflow (`.github/workflows/release.yml`) for automated releases. When you push a tag (e.g., `v1.0.0`), the workflow automatically:
 
-1. Builds binaries for all supported architectures
+1. Builds binary for Linux amd64 architecture
 2. Creates a GitHub release
 3. Uploads artifacts and checksums
 
@@ -1249,7 +1398,9 @@ git push origin v1.0.0
 
 #### Cross-Compilation
 
-For ARM builds, install cross-compiler toolchains:
+**Note**: Currently, releases are built only for Linux amd64. Cross-compilation for ARM architectures requires proper C cross-compiler toolchains and is not currently included in automated releases.
+
+For future ARM builds, you would need to install cross-compiler toolchains:
 
 ```bash
 # Ubuntu/Debian
@@ -1264,8 +1415,8 @@ sudo apt-get install gcc-arm-linux-gnueabihf gcc-aarch64-linux-gnu gcc-i686-linu
 #### Release Artifacts
 
 Each release includes:
-- Binaries for all supported architectures (linux/amd64, linux/arm64, linux/arm, linux/386)
-- Archive files (tar.gz) with LICENSE and README.md
+- Binary for Linux amd64 architecture
+- Archive file (tar.gz) with LICENSE and README.md
 - SHA256 checksums file
 - Release notes with changelog
 
@@ -1298,28 +1449,35 @@ go test -race ./fs
 
 #### Test Categories
 
-- **Unit Tests** (66 tests): Core functionality and utilities
+- **Unit Tests**: Core functionality and utilities
   - Path rebasing and caching
   - Extended attributes handling
   - File operations
   - Git manager operations
-  - Pattern filtering and glob expansion (13 new tests)
+  - Activity tracking
+  - Logger functionality
+  - Path utilities
+  - Permission and validation utilities
+  - Pattern filtering and glob expansion
 
-- **FUSE Tests** (6 tests): FUSE operation testing
+- **FUSE Tests**: FUSE operation testing
   - File create, read, write, delete
   - Directory operations
   - Attribute handling
 
-- **Stress Tests** (6 tests): Performance and edge cases
+- **Stress Tests**: Performance and edge cases
   - Concurrent operations
   - Large file handling
   - Memory usage
 
-- **Integration Tests** (9 tests): Full filesystem mounting
-  - End-to-end filesystem operations
+- **Integration Tests**: Full filesystem mounting and CLI commands
+  - End-to-end filesystem operations (29 tests in `filesystem_integration_test.go`)
+  - CLI command integration tests (12 tests in `cmd/shadowfs/cli_test.go`)
   - Cache persistence
   - Git auto-versioning
-  - Version commands with pattern filtering (3 new tests)
+  - Version commands (list, diff, restore, log)
+  - Sync and backup operations
+  - Daemon mode operations
 
 #### Test Requirements
 
@@ -1700,37 +1858,36 @@ Contact: Twitter [@pleclech](https://twitter.com/pleclech)
 
 ## Changelog
 
-### v1.1.0 (Latest)
+### v1.0.0 (Latest) - "First Light"
+
+**Initial Release:**
+- Basic overlay filesystem functionality
+- Comprehensive test suite
+- Linux support with FUSE
 
 **Git Auto-Versioning:**
-- Added automatic Git versioning with idle-based commits
+- Automatic Git versioning with idle-based commits
 - Batch commits for multiple files edited together
 - Commit-on-unmount to prevent data loss
 - Change detection to skip commits for unchanged files
 - Async git operations (non-blocking)
 
-**Performance Improvements:**
-- Removed reflection overhead (100-1000x faster)
-- Added buffer pools for file operations (reduces allocations)
-- Optimized path operations (removed redundant validations)
+**Performance:**
+- Buffer pools for file operations (reduces allocations)
+- Optimized path operations
 - Async git operations don't block filesystem
 
-**Security Enhancements:**
+**Security:**
 - Path validation and traversal protection
 - Comprehensive error handling
 - Safe resource management
 
-**Reliability:**
-- Fixed race conditions in commit operations
-- Improved error handling and logging
-- Better resource cleanup on unmount
-
-### v1.0.0
-
-- Initial release
-- Basic overlay filesystem functionality
-- Comprehensive test suite
-- Linux support with FUSE
+**Features:**
+- Daemon mode for background operation
+- Mount status and information commands
+- Sync to source with automatic backups
+- Version management (list, diff, restore)
+- Backup management and rollback capabilities
 
 ## Support
 
