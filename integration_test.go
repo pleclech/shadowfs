@@ -1021,3 +1021,79 @@ func TestSecurity_RenameComprehensive(t *testing.T) {
 		t.Error("newdir should be a directory after rename")
 	}
 }
+
+func TestFilesystem_MkdirAfterUnlink(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	// Build binary
+	if err := exec.Command("go", "build", "-o", testBinary, "./cmd/shadowfs").Run(); err != nil {
+		t.Fatalf("Failed to build binary: %v", err)
+	}
+	defer os.Remove(testBinary)
+
+	mountPoint := t.TempDir()
+	srcDir := t.TempDir()
+
+	// Create a file "foo" in source
+	fooFile := filepath.Join(srcDir, "foo")
+	if err := os.WriteFile(fooFile, []byte("test content"), 0644); err != nil {
+		t.Fatalf("Failed to create source file: %v", err)
+	}
+
+	// Start filesystem
+	cmd := exec.Command(testBinary, mountPoint, srcDir)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Failed to start filesystem: %v", err)
+	}
+	defer func() {
+		gracefulShutdown(cmd, mountPoint, t)
+	}()
+
+	// Wait for filesystem to be ready
+	time.Sleep(100 * time.Millisecond)
+
+	mountedFoo := filepath.Join(mountPoint, "foo")
+
+	// Verify file exists initially
+	if _, err := os.Stat(mountedFoo); os.IsNotExist(err) {
+		t.Fatal("File 'foo' should exist initially")
+	}
+
+	// Delete the file via Unlink (os.Remove)
+	if err := os.Remove(mountedFoo); err != nil {
+		t.Fatalf("Failed to remove file: %v", err)
+	}
+
+	// Verify file is gone from mount
+	if _, err := os.Stat(mountedFoo); err == nil {
+		t.Fatal("File 'foo' should not exist after deletion")
+	}
+
+	// Now try to create a directory with the same name "foo"
+	// This should succeed after our fix
+	if err := os.Mkdir(mountedFoo, 0755); err != nil {
+		t.Fatalf("Failed to create directory 'foo' after deleting file: %v", err)
+	}
+
+	// Verify the directory was created successfully
+	if stat, err := os.Stat(mountedFoo); err != nil {
+		t.Fatalf("Directory 'foo' should exist: %v", err)
+	} else if !stat.IsDir() {
+		t.Fatal("Path 'foo' should be a directory, not a file")
+	}
+
+	// Verify we can use the directory
+	testFile := filepath.Join(mountedFoo, "test.txt")
+	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
+		t.Fatalf("Failed to create file in directory: %v", err)
+	}
+
+	// Verify file exists in directory
+	if content, err := os.ReadFile(testFile); err != nil {
+		t.Fatalf("Failed to read file in directory: %v", err)
+	} else if string(content) != "test" {
+		t.Errorf("Expected 'test', got '%s'", string(content))
+	}
+}

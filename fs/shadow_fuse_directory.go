@@ -46,6 +46,25 @@ func (n *ShadowNode) Mkdir(ctx context.Context, name string, mode uint32, out *f
 	// change path to cache
 	p = n.RebasePathUsingCache(p)
 
+	// Check if path exists and is marked as deleted (from a previous file deletion)
+	// If so, remove the deleted file and xattr to allow directory creation
+	var existingSt syscall.Stat_t
+	if err := syscall.Lstat(p, &existingSt); err == nil {
+		// Path exists - check if it's marked as deleted
+		attr := xattr.XAttr{}
+		exists, errno := xattr.Get(p, &attr)
+		if errno == 0 && exists && xattr.IsPathDeleted(attr) {
+			// Path exists and is marked as deleted - remove it to allow directory creation
+			// Remove the xattr first
+			syscall.Removexattr(p, xattr.Name)
+			// Remove the file
+			if err := syscall.Unlink(p); err != nil {
+				// If unlink fails, continue anyway - might be a directory already
+				// The subsequent Mkdir will handle it
+			}
+		}
+	}
+
 	// Ensure parent directory has execute permissions before creating child
 	// This is critical - if parent can't be traversed, child creation will fail
 	parentDir := filepath.Dir(p)
