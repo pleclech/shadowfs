@@ -31,6 +31,7 @@ type SyncResult struct {
 	Success           bool
 	BackupID          string
 	FilesSynced       int
+	FilesSyncedList   []string // List of files that were successfully synced
 	FilesFailed       int
 	FilesSkipped      int
 	Errors            []SyncError
@@ -56,7 +57,8 @@ type BackupInfo struct {
 // SyncCacheToSource syncs cache to source with full safety mechanisms
 func SyncCacheToSource(options SyncOptions) (*SyncResult, error) {
 	result := &SyncResult{
-		Errors: make([]SyncError, 0),
+		Errors:        make([]SyncError, 0),
+		FilesSyncedList: make([]string, 0),
 	}
 
 	// Validate inputs
@@ -138,6 +140,7 @@ func SyncCacheToSource(options SyncOptions) (*SyncResult, error) {
 
 		transactionLog = append(transactionLog, relPath)
 		result.FilesSynced++
+		result.FilesSyncedList = append(result.FilesSyncedList, relPath)
 	}
 
 	// Delete files marked as deleted in cache
@@ -163,6 +166,7 @@ func SyncCacheToSource(options SyncOptions) (*SyncResult, error) {
 
 		transactionLog = append(transactionLog, "-"+relPath) // Mark as deletion
 		result.FilesSynced++
+		result.FilesSyncedList = append(result.FilesSyncedList, relPath+" (deleted)")
 	}
 
 	// Update backup info with transaction log if backup was created

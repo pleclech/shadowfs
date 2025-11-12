@@ -65,6 +65,10 @@ func runVersionList(args []string) {
 
 	gm, err := shadowfs.GetGitRepository(*mountPoint)
 	if err != nil {
+		// Add helpful suggestion for git repository not found
+		if strings.Contains(err.Error(), "git repository not found") {
+			log.Fatalf("Failed to get git repository: %v\n\nTip: Did you enable git with -auto-git flag? Try: shadowfs -auto-git %s <srcdir>", err, *mountPoint)
+		}
 		log.Fatalf("Failed to get git repository: %v", err)
 	}
 
@@ -129,6 +133,10 @@ func runVersionDiff(args []string) {
 
 	gm, err := shadowfs.GetGitRepository(*mountPoint)
 	if err != nil {
+		// Add helpful suggestion for git repository not found
+		if strings.Contains(err.Error(), "git repository not found") {
+			log.Fatalf("Failed to get git repository: %v\n\nTip: Did you enable git with -auto-git flag? Try: shadowfs -auto-git %s <srcdir>", err, *mountPoint)
+		}
 		log.Fatalf("Failed to get git repository: %v", err)
 	}
 
@@ -215,6 +223,10 @@ func runVersionRestore(args []string) {
 
 	gm, err := shadowfs.GetGitRepository(*mountPoint)
 	if err != nil {
+		// Add helpful suggestion for git repository not found
+		if strings.Contains(err.Error(), "git repository not found") {
+			log.Fatalf("Failed to get git repository: %v\n\nTip: Did you enable git with -auto-git flag? Try: shadowfs -auto-git %s <srcdir>", err, *mountPoint)
+		}
 		log.Fatalf("Failed to get git repository: %v", err)
 	}
 
@@ -269,6 +281,10 @@ func runVersionLog(args []string) {
 
 	gm, err := shadowfs.GetGitRepository(*mountPoint)
 	if err != nil {
+		// Add helpful suggestion for git repository not found
+		if strings.Contains(err.Error(), "git repository not found") {
+			log.Fatalf("Failed to get git repository: %v\n\nTip: Did you enable git with -auto-git flag? Try: shadowfs -auto-git %s <srcdir>", err, *mountPoint)
+		}
 		log.Fatalf("Failed to get git repository: %v", err)
 	}
 

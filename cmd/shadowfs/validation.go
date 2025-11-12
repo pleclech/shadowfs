@@ -19,7 +19,14 @@ func validateMountPoint(mountPoint string) error {
 	}
 
 	_, err := rootinit.GetMountPoint(mountPoint)
-	return err
+	if err != nil {
+		// Add helpful suggestion if mount point doesn't exist
+		if strings.Contains(err.Error(), "mount point does not exist") {
+			return fmt.Errorf("%w\n\nTip: Create the mount point directory with: mkdir -p %s", err, mountPoint)
+		}
+		return err
+	}
+	return nil
 }
 
 // validateCommitHash checks if a commit hash exists in the Git repository

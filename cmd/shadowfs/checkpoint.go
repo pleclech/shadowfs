@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"strings"
 
 	shadowfs "github.com/pleclech/shadowfs/fs"
 	"github.com/pleclech/shadowfs/fs/cache"
@@ -27,6 +28,10 @@ func runCheckpointCommand(args []string) {
 
 	gm, err := shadowfs.GetGitRepository(*mountPoint)
 	if err != nil {
+		// Add helpful suggestion for git repository not found
+		if strings.Contains(err.Error(), "git repository not found") {
+			log.Fatalf("Failed to get git repository: %v\n\nTip: Did you enable git with -auto-git flag? Try: shadowfs -auto-git %s <srcdir>", err, *mountPoint)
+		}
 		log.Fatalf("Failed to get git repository: %v", err)
 	}
 
@@ -37,6 +42,10 @@ func runCheckpointCommand(args []string) {
 	// Find cache directory to get cache path
 	cacheDir, err := rootinit.FindCacheDirectory(*mountPoint)
 	if err != nil {
+		// Add helpful suggestion for cache directory not found
+		if strings.Contains(err.Error(), "cache directory not found") {
+			log.Fatalf("Failed to find cache directory: %v\n\nTip: Is the filesystem mounted? Try: shadowfs %s <srcdir>", err, *mountPoint)
+		}
 		log.Fatalf("Failed to find cache directory: %v", err)
 	}
 

@@ -653,7 +653,28 @@ func (gm *GitManager) Diff(options DiffOptions, stdout io.Writer) error {
 		args = append(args, options.Paths...)
 	}
 
-	return gm.executeGitCommand(args, stdout, nil)
+	// Capture output to check if diff is empty
+	var outputBuf strings.Builder
+	var multiWriter io.Writer
+	if stdout != nil {
+		multiWriter = io.MultiWriter(stdout, &outputBuf)
+	} else {
+		multiWriter = &outputBuf
+	}
+
+	err := gm.executeGitCommand(args, multiWriter, nil)
+	if err != nil {
+		return err
+	}
+
+	// Check if diff output is empty (no differences)
+	outputStr := strings.TrimSpace(outputBuf.String())
+	if outputStr == "" && stdout != nil {
+		// Write helpful message if diff is empty
+		fmt.Fprintf(stdout, "No differences found\n")
+	}
+
+	return nil
 }
 
 // Checkout executes git checkout to restore files from a specific commit

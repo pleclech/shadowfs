@@ -38,6 +38,10 @@ func runSyncCommand(args []string) {
 	// Find cache directory
 	cacheDir, err := rootinit.FindCacheDirectory(*mountPoint)
 	if err != nil {
+		// Add helpful suggestion for cache directory not found
+		if strings.Contains(err.Error(), "cache directory not found") {
+			log.Fatalf("Failed to find cache directory: %v\n\nTip: Is the filesystem mounted? Try: shadowfs %s <srcdir>", err, *mountPoint)
+		}
 		log.Fatalf("Failed to find cache directory: %v", err)
 	}
 
@@ -85,7 +89,23 @@ func runSyncCommand(args []string) {
 	if result.BackupID != "" {
 		fmt.Printf("Backup created: %s\n", result.BackupID)
 	}
-	fmt.Printf("Synced %d files\n", result.FilesSynced)
+	
+	// Show which files were synced
+	if result.FilesSynced > 0 {
+		if len(result.FilesSyncedList) <= 10 {
+			// Show all files if 10 or fewer
+			fmt.Printf("Synced %d files: %s\n", result.FilesSynced, strings.Join(result.FilesSyncedList, ", "))
+		} else {
+			// Show first few files and count for many files
+			fmt.Printf("Synced %d files: %s ... and %d more files\n", 
+				result.FilesSynced, 
+				strings.Join(result.FilesSyncedList[:10], ", "),
+				len(result.FilesSyncedList)-10)
+		}
+	} else {
+		fmt.Printf("No files to sync\n")
+	}
+	
 	if result.FilesFailed > 0 {
 		fmt.Printf("Failed: %d files\n", result.FilesFailed)
 		for _, e := range result.Errors {
