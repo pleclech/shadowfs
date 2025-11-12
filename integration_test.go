@@ -786,7 +786,7 @@ func TestVersionList_WithPattern(t *testing.T) {
 	srcDir := t.TempDir()
 
 	// Start filesystem with Git enabled
-	cmd := exec.Command(testBinary, mountPoint, srcDir, "-git-enabled")
+	cmd := exec.Command(testBinary, "-auto-git", mountPoint, srcDir)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
@@ -854,7 +854,7 @@ func TestVersionDiff_WithPattern(t *testing.T) {
 	srcDir := t.TempDir()
 
 	// Start filesystem with Git enabled
-	cmd := exec.Command(testBinary, mountPoint, srcDir, "-git-enabled")
+	cmd := exec.Command(testBinary, "-auto-git", mountPoint, srcDir)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
@@ -910,7 +910,7 @@ func TestVersionLog_WithPattern(t *testing.T) {
 	srcDir := t.TempDir()
 
 	// Start filesystem with Git enabled
-	cmd := exec.Command(testBinary, mountPoint, srcDir, "-git-enabled")
+	cmd := exec.Command(testBinary, "-auto-git", mountPoint, srcDir)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {

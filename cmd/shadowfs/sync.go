@@ -11,6 +11,7 @@ import (
 
 	shadowfs "github.com/pleclech/shadowfs/fs"
 	"github.com/pleclech/shadowfs/fs/cache"
+	"github.com/pleclech/shadowfs/fs/rootinit"
 )
 
 func runSyncCommand(args []string) {
@@ -35,7 +36,7 @@ func runSyncCommand(args []string) {
 	}
 
 	// Find cache directory
-	cacheDir, err := shadowfs.FindCacheDirectory(*mountPoint)
+	cacheDir, err := rootinit.FindCacheDirectory(*mountPoint)
 	if err != nil {
 		log.Fatalf("Failed to find cache directory: %v", err)
 	}
@@ -158,7 +159,7 @@ func runBackupsList(args []string) {
 		if len(sourcePath) > 38 {
 			sourcePath = "..." + sourcePath[len(sourcePath)-35:]
 		}
-		fmt.Printf("%-20s %-20s %-40s %10s %8d\n", 
+		fmt.Printf("%-20s %-20s %-40s %10s %8d\n",
 			backup.ID[:20], timestampStr, sourcePath, sizeStr, backup.FileCount)
 	}
 }

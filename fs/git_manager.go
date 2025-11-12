@@ -12,14 +12,15 @@ import (
 	"time"
 
 	"github.com/pleclech/shadowfs/fs/cache"
+	"github.com/pleclech/shadowfs/fs/rootinit"
 )
 
 // CommitRequest represents a request to commit files
 type CommitRequest struct {
-	filePaths   []string
-	reason      string
-	commitType  string // "auto-save", "checkpoint", "unmount"
-	result      chan error
+	filePaths  []string
+	reason     string
+	commitType string // "auto-save", "checkpoint", "unmount"
+	result     chan error
 }
 
 // GitManager handles automatic Git operations for overlay workspace
@@ -275,7 +276,7 @@ func (gm *GitManager) CommitFilesBatchCheckpoint(filePaths []string, reason stri
 func (gm *GitManager) autoCommitFileSync(filePath string, reason string, commitType string) error {
 	log.Printf("autoCommitFileSync: Starting commit for %s (type: %s, reason: %s)", filePath, commitType, reason)
 	log.Printf("autoCommitFileSync: Workspace path: %s, Git dir: %s, Git work dir: %s", gm.workspacePath, gm.gitDir, gm.gitWorkDir)
-	
+
 	// Validate and convert absolute path to relative path
 	relativePath, err := gm.normalizePath(filePath)
 	if err != nil {
@@ -357,9 +358,9 @@ func (gm *GitManager) AutoCommitFilesBatch(filePaths []string, reason string) er
 	select {
 	case gm.commitQueue <- CommitRequest{
 		filePaths:  filePaths,
-		reason:    reason,
+		reason:     reason,
 		commitType: "auto-save",
-		result:    result,
+		result:     result,
 	}:
 		// Commit queued successfully, return immediately (non-blocking)
 		return nil
@@ -519,7 +520,7 @@ func (gm *GitManager) executeGitCommand(args []string, stdout, stderr io.Writer)
 	// Build command with consistent git directory and working directory
 	cmdArgs := []string{"--git-dir", gm.gitDir, "-C", gm.gitWorkDir}
 	cmdArgs = append(cmdArgs, args...)
-	
+
 	cmd := exec.Command("git", cmdArgs...)
 	if stdout != nil {
 		cmd.Stdout = stdout
@@ -527,7 +528,7 @@ func (gm *GitManager) executeGitCommand(args []string, stdout, stderr io.Writer)
 	if stderr != nil {
 		cmd.Stderr = stderr
 	}
-	
+
 	return cmd.Run()
 }
 
@@ -538,7 +539,7 @@ func (gm *GitManager) StatusPorcelain() ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to run git status: %w", err)
 	}
-	
+
 	var changedFiles []string
 	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
 	for _, line := range lines {
@@ -554,7 +555,7 @@ func (gm *GitManager) StatusPorcelain() ([]string, error) {
 			changedFiles = append(changedFiles, filename)
 		}
 	}
-	
+
 	return changedFiles, nil
 }
 
@@ -570,7 +571,7 @@ func (gm *GitManager) ValidateCommitHash(hash string) error {
 // Log executes git log with the provided options and writes output to stdout
 func (gm *GitManager) Log(options LogOptions, stdout io.Writer) error {
 	args := []string{"log"}
-	
+
 	if options.Format != "" {
 		args = append(args, "--pretty=format:"+options.Format)
 	} else if options.Oneline {
@@ -578,60 +579,199 @@ func (gm *GitManager) Log(options LogOptions, stdout io.Writer) error {
 	} else {
 		args = append(args, "--pretty=format:%h %ad %s", "--date=short")
 	}
-	
+
 	if options.Graph {
 		args = append(args, "--graph")
 	}
-	
+
 	if options.Stat {
 		args = append(args, "--stat")
 	}
-	
+
 	if options.Since != "" {
 		args = append(args, "--since="+options.Since)
 	}
-	
+
 	if options.Limit > 0 {
 		args = append(args, fmt.Sprintf("-%d", options.Limit))
 	}
-	
+
 	if len(options.Paths) > 0 {
 		args = append(args, "--")
 		args = append(args, options.Paths...)
 	}
-	
+
 	return gm.executeGitCommand(args, stdout, nil)
 }
 
 // Diff executes git diff with the provided options and writes output to stdout
 func (gm *GitManager) Diff(options DiffOptions, stdout io.Writer) error {
 	args := []string{"diff"}
-	
+
 	if options.Stat {
 		args = append(args, "--stat")
 	}
-	
+
 	// Add commit arguments (e.g., "HEAD~1", "HEAD")
 	args = append(args, options.CommitArgs...)
-	
+
 	if len(options.Paths) > 0 {
 		args = append(args, "--")
 		args = append(args, options.Paths...)
 	}
-	
+
 	return gm.executeGitCommand(args, stdout, nil)
 }
 
 // Checkout executes git checkout to restore files from a specific commit
 func (gm *GitManager) Checkout(commitHash string, paths []string, force bool, stdout, stderr io.Writer) error {
 	args := []string{"checkout"}
-	
+
 	if force {
 		args = append(args, "-f")
 	}
-	
+
 	args = append(args, commitHash, "--")
 	args = append(args, paths...)
-	
+
 	return gm.executeGitCommand(args, stdout, stderr)
+}
+
+// GetGitRepository creates a GitManager for an existing mount point
+func GetGitRepository(mountPoint string) (*GitManager, error) {
+	// Normalize mount point
+	normalizedMountPoint, err := rootinit.GetMountPoint(mountPoint)
+	if err != nil {
+		return nil, fmt.Errorf("invalid mount point: %w", err)
+	}
+
+	// git init creates .gitofs/.git/ in mount point, so check for .gitofs/.git
+	gitDir := filepath.Join(normalizedMountPoint, ".gitofs", ".git")
+	if _, err := os.Stat(gitDir); err != nil {
+		return nil, fmt.Errorf("git repository not found in mount point: %w", err)
+	}
+
+	// Find cache directory to read source directory from .target file
+	cacheDir, err := rootinit.FindCacheDirectory(normalizedMountPoint)
+	if err != nil {
+		return nil, fmt.Errorf("cannot find cache directory: %w", err)
+	}
+
+	// Read source directory from .target file
+	targetFile := cache.GetTargetFilePath(cacheDir)
+	srcDirData, err := os.ReadFile(targetFile)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read source directory from .target file: %w", err)
+	}
+	srcDir := strings.TrimSpace(string(srcDirData))
+
+	// Create GitManager (Git is already initialized)
+	// Pass mount point as workspacePath, not cacheDir
+	config := GitConfig{
+		AutoCommit: true, // Assume enabled if repo exists
+	}
+	gm := NewGitManager(normalizedMountPoint, srcDir, config)
+	gm.enabled = true // Mark as enabled
+
+	return gm, nil
+}
+
+// ValidateGitRepository checks if a Git repository exists and is valid for a mount point
+func ValidateGitRepository(mountPoint string) error {
+	// Normalize mount point
+	normalizedMountPoint, err := rootinit.GetMountPoint(mountPoint)
+	if err != nil {
+		return fmt.Errorf("invalid mount point: %w", err)
+	}
+
+	// git init creates .gitofs/.git/ in mount point, so check for .gitofs/.git
+	gitDir := filepath.Join(normalizedMountPoint, ".gitofs", ".git")
+	if _, err := os.Stat(gitDir); err != nil {
+		return fmt.Errorf("git repository not found: %w", err)
+	}
+
+	// Check if it's a valid git repository by checking for HEAD
+	headFile := filepath.Join(gitDir, "HEAD")
+	if _, err := os.Stat(headFile); err != nil {
+		return fmt.Errorf("invalid git repository (HEAD not found): %w", err)
+	}
+
+	return nil
+}
+
+// ExpandGlobPatterns expands glob patterns and returns a list of matching files
+// relative to the workspace root. Handles both glob patterns and regular paths.
+// Note: `**` patterns (recursive globbing) are passed directly to Git without expansion,
+// as Go's filepath.Glob doesn't support them, but Git does.
+func ExpandGlobPatterns(workspacePath string, patterns []string) ([]string, error) {
+	if len(patterns) == 0 {
+		return nil, nil
+	}
+
+	var expandedPaths []string
+	seen := make(map[string]bool) // Deduplicate paths
+
+	for _, pattern := range patterns {
+		if pattern == "" {
+			continue
+		}
+
+		// Check if pattern contains recursive glob (**) - pass directly to Git
+		if strings.Contains(pattern, "**") {
+			normalized := filepath.ToSlash(pattern)
+			if !seen[normalized] {
+				expandedPaths = append(expandedPaths, normalized)
+				seen[normalized] = true
+			}
+			continue
+		}
+
+		// Check if pattern contains glob characters
+		hasGlob := strings.Contains(pattern, "*") || strings.Contains(pattern, "?") || strings.Contains(pattern, "[")
+
+		if hasGlob {
+			// Expand glob pattern relative to workspace
+			matches, err := filepath.Glob(filepath.Join(workspacePath, pattern))
+			if err != nil {
+				return nil, fmt.Errorf("invalid glob pattern %s: %w", pattern, err)
+			}
+
+			// Convert absolute paths to relative paths
+			for _, match := range matches {
+				relPath, err := filepath.Rel(workspacePath, match)
+				if err != nil {
+					continue // Skip if can't make relative
+				}
+
+				// Normalize path separators
+				relPath = filepath.ToSlash(relPath)
+				if !seen[relPath] {
+					expandedPaths = append(expandedPaths, relPath)
+					seen[relPath] = true
+				}
+			}
+		} else {
+			// Regular path - validate it exists and make it relative
+			fullPath := filepath.Join(workspacePath, pattern)
+			if _, err := os.Stat(fullPath); err == nil {
+				relPath, err := filepath.Rel(workspacePath, fullPath)
+				if err == nil {
+					relPath = filepath.ToSlash(relPath)
+					if !seen[relPath] {
+						expandedPaths = append(expandedPaths, relPath)
+						seen[relPath] = true
+					}
+				}
+			}
+			// If path doesn't exist, still add it (Git will handle it)
+			// This allows filtering by paths that existed in history but not now
+			normalized := filepath.ToSlash(pattern)
+			if !seen[normalized] {
+				expandedPaths = append(expandedPaths, normalized)
+				seen[normalized] = true
+			}
+		}
+	}
+
+	return expandedPaths, nil
 }

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/pleclech/shadowfs/fs/cache"
+	"github.com/pleclech/shadowfs/fs/rootinit"
 )
 
 func TestFindCacheDirectory(t *testing.T) {
@@ -59,7 +60,7 @@ func TestFindCacheDirectory(t *testing.T) {
 	os.Setenv("SHADOWFS_CACHE_DIR", cacheBaseDir)
 
 	// Test FindCacheDirectory
-	foundCacheDir, err := FindCacheDirectory(mountPoint)
+	foundCacheDir, err := rootinit.FindCacheDirectory(mountPoint)
 	if err != nil {
 		t.Fatalf("FindCacheDirectory failed: %v", err)
 	}
@@ -111,10 +112,20 @@ func TestGetGitRepository(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
+	mountPoint := filepath.Join(tempDir, "mount")
 	sourceDir := filepath.Join(tempDir, "source")
+	cacheBaseDir := filepath.Join(tempDir, ".shadowfs")
 
-	// Create .gitofs/.git directory structure (as created by git init)
-	gitDir := filepath.Join(tempDir, ".gitofs", ".git")
+	// Create mount point and source directories
+	if err := os.MkdirAll(mountPoint, 0755); err != nil {
+		t.Fatalf("Failed to create mount point: %v", err)
+	}
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatalf("Failed to create source dir: %v", err)
+	}
+
+	// Create .gitofs/.git directory structure in mount point (as created by git init)
+	gitDir := filepath.Join(mountPoint, ".gitofs", ".git")
 	if err := os.MkdirAll(gitDir, 0755); err != nil {
 		t.Fatalf("Failed to create git dir: %v", err)
 	}
@@ -125,14 +136,33 @@ func TestGetGitRepository(t *testing.T) {
 		t.Fatalf("Failed to create HEAD file: %v", err)
 	}
 
-	// Create .target file
-	targetFile := filepath.Join(tempDir, ".target")
+	// Create cache directory structure
+	mountID := cache.ComputeMountID(mountPoint, sourceDir)
+	sessionPath := filepath.Join(cacheBaseDir, mountID)
+	if err := os.MkdirAll(sessionPath, 0755); err != nil {
+		t.Fatalf("Failed to create session path: %v", err)
+	}
+
+	// Create .target file in cache directory
+	targetFile := cache.GetTargetFilePath(sessionPath)
 	if err := os.WriteFile(targetFile, []byte(sourceDir), 0444); err != nil {
 		t.Fatalf("Failed to create target file: %v", err)
 	}
 
-	// Test GetGitRepository
-	gm, err := GetGitRepository(tempDir)
+	// Create .root directory so FindCacheDirectory can find it
+	// (FindCacheDirectory currently checks for .gitofs, but we'll create .root as fallback)
+	cachePath := cache.GetCachePath(sessionPath)
+	if err := os.MkdirAll(cachePath, 0755); err != nil {
+		t.Fatalf("Failed to create cache path: %v", err)
+	}
+
+	// Set environment variable for cache directory
+	oldEnv := os.Getenv("SHADOWFS_CACHE_DIR")
+	defer os.Setenv("SHADOWFS_CACHE_DIR", oldEnv)
+	os.Setenv("SHADOWFS_CACHE_DIR", cacheBaseDir)
+
+	// Test GetGitRepository with mount point
+	gm, err := GetGitRepository(mountPoint)
 	if err != nil {
 		t.Fatalf("GetGitRepository failed: %v", err)
 	}
@@ -145,8 +175,13 @@ func TestGetGitRepository(t *testing.T) {
 		t.Error("GitManager should be enabled")
 	}
 
-	if gm.GetWorkspacePath() != tempDir {
-		t.Errorf("Expected workspace path %s, got %s", tempDir, gm.GetWorkspacePath())
+	// Normalize mount point for comparison (GetGitRepository normalizes it)
+	normalizedMountPoint, err := rootinit.GetMountPoint(mountPoint)
+	if err != nil {
+		t.Fatalf("Failed to normalize mount point: %v", err)
+	}
+	if gm.GetWorkspacePath() != normalizedMountPoint {
+		t.Errorf("Expected workspace path %s, got %s", normalizedMountPoint, gm.GetWorkspacePath())
 	}
 }
 
@@ -534,4 +569,3 @@ func TestExpandGlobPatterns_NestedDirectories(t *testing.T) {
 		t.Errorf("Expected %v, got %v", expected, result)
 	}
 }
-

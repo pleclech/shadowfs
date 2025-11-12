@@ -63,12 +63,7 @@ func runVersionList(args []string) {
 		log.Fatalf("Invalid mount point: %v", err)
 	}
 
-	cacheDir, err := shadowfs.FindCacheDirectory(*mountPoint)
-	if err != nil {
-		log.Fatalf("Failed to find cache directory: %v", err)
-	}
-
-	gm, err := shadowfs.GetGitRepository(cacheDir)
+	gm, err := shadowfs.GetGitRepository(*mountPoint)
 	if err != nil {
 		log.Fatalf("Failed to get git repository: %v", err)
 	}
@@ -126,12 +121,7 @@ func runVersionDiff(args []string) {
 		log.Fatalf("Invalid mount point: %v", err)
 	}
 
-	cacheDir, err := shadowfs.FindCacheDirectory(*mountPoint)
-	if err != nil {
-		log.Fatalf("Failed to find cache directory: %v", err)
-	}
-
-	gm, err := shadowfs.GetGitRepository(cacheDir)
+	gm, err := shadowfs.GetGitRepository(*mountPoint)
 	if err != nil {
 		log.Fatalf("Failed to get git repository: %v", err)
 	}
@@ -213,12 +203,7 @@ func runVersionRestore(args []string) {
 		log.Fatalf("Invalid mount point: %v", err)
 	}
 
-	cacheDir, err := shadowfs.FindCacheDirectory(*mountPoint)
-	if err != nil {
-		log.Fatalf("Failed to find cache directory: %v", err)
-	}
-
-	gm, err := shadowfs.GetGitRepository(cacheDir)
+	gm, err := shadowfs.GetGitRepository(*mountPoint)
 	if err != nil {
 		log.Fatalf("Failed to get git repository: %v", err)
 	}
@@ -272,12 +257,7 @@ func runVersionLog(args []string) {
 		log.Fatalf("Invalid mount point: %v", err)
 	}
 
-	cacheDir, err := shadowfs.FindCacheDirectory(*mountPoint)
-	if err != nil {
-		log.Fatalf("Failed to find cache directory: %v", err)
-	}
-
-	gm, err := shadowfs.GetGitRepository(cacheDir)
+	gm, err := shadowfs.GetGitRepository(*mountPoint)
 	if err != nil {
 		log.Fatalf("Failed to get git repository: %v", err)
 	}
@@ -319,4 +299,3 @@ func runVersionLog(args []string) {
 		log.Fatalf("Failed to run git log: %v", err)
 	}
 }
-

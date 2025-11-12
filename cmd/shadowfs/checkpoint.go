@@ -8,6 +8,7 @@ import (
 
 	shadowfs "github.com/pleclech/shadowfs/fs"
 	"github.com/pleclech/shadowfs/fs/cache"
+	"github.com/pleclech/shadowfs/fs/rootinit"
 )
 
 func runCheckpointCommand(args []string) {
@@ -24,18 +25,19 @@ func runCheckpointCommand(args []string) {
 		log.Fatalf("Invalid mount point: %v", err)
 	}
 
-	cacheDir, err := shadowfs.FindCacheDirectory(*mountPoint)
-	if err != nil {
-		log.Fatalf("Failed to find cache directory: %v", err)
-	}
-
-	gm, err := shadowfs.GetGitRepository(cacheDir)
+	gm, err := shadowfs.GetGitRepository(*mountPoint)
 	if err != nil {
 		log.Fatalf("Failed to get git repository: %v", err)
 	}
 
 	if !gm.IsEnabled() {
 		log.Fatal("Git auto-versioning is not enabled for this mount point")
+	}
+
+	// Find cache directory to get cache path
+	cacheDir, err := rootinit.FindCacheDirectory(*mountPoint)
+	if err != nil {
+		log.Fatalf("Failed to find cache directory: %v", err)
 	}
 
 	// Get cache path using centralized function

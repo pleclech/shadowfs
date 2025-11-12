@@ -176,8 +176,20 @@ func SyncCacheToSource(options SyncOptions) (*SyncResult, error) {
 
 // CreateBackup creates a timestamped backup of the source directory
 func CreateBackup(sourcePath, mountPoint string) (string, string, error) {
-	// Compute mount ID using centralized function
-	mountID := cache.ComputeMountID(mountPoint, sourcePath)
+	// Normalize mount point path using same method as NewShadowRoot for consistency
+	// Note: We normalize the path but don't require it to exist, as backups may be created
+	// before the mount point is actually mounted (e.g., in tests)
+	normalizedMountPoint := filepath.Clean(mountPoint)
+	if !filepath.IsAbs(normalizedMountPoint) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", "", fmt.Errorf("failed to get current directory: %w", err)
+		}
+		normalizedMountPoint = filepath.Clean(filepath.Join(cwd, normalizedMountPoint))
+	}
+	
+	// Compute mount ID using centralized function with normalized mount point
+	mountID := cache.ComputeMountID(normalizedMountPoint, sourcePath)
 	
 	// Create backup directory name
 	timestamp := time.Now().Format("20060102-150405")
@@ -210,7 +222,7 @@ func CreateBackup(sourcePath, mountPoint string) (string, string, error) {
 	info := BackupInfo{
 		Timestamp:  time.Now(),
 		MountID:     mountID,
-		MountPoint:  mountPoint, // Store mount point for filtering
+		MountPoint:  normalizedMountPoint, // Store normalized mount point for filtering
 		SourcePath:  sourcePath,
 		FilesChanged: []string{}, // Will be populated during sync
 	}
@@ -603,6 +615,20 @@ func getBackupBaseDir() (string, error) {
 
 // ListBackups returns a list of all backup IDs
 func ListBackups(mountPoint string) ([]BackupListItem, error) {
+	// Normalize mount point if specified
+	// Note: We normalize the path but don't require it to exist, as we're just filtering backups
+	var normalizedMountPoint string
+	if mountPoint != "" {
+		normalizedMountPoint = filepath.Clean(mountPoint)
+		if !filepath.IsAbs(normalizedMountPoint) {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return nil, fmt.Errorf("failed to get current directory: %w", err)
+			}
+			normalizedMountPoint = filepath.Clean(filepath.Join(cwd, normalizedMountPoint))
+		}
+	}
+	
 	backupBaseDir, err := getBackupBaseDir()
 	if err != nil {
 		return nil, err
@@ -633,8 +659,18 @@ func ListBackups(mountPoint string) ([]BackupListItem, error) {
 		}
 
 		// Filter by mount point if specified
-		if mountPoint != "" && info.MountPoint != mountPoint {
-			continue
+		// Normalize stored mount point for comparison (handle legacy backups with unnormalized paths)
+		if normalizedMountPoint != "" {
+			// Normalize stored mount point for comparison
+			storedMountPoint := filepath.Clean(info.MountPoint)
+			if !filepath.IsAbs(storedMountPoint) {
+				if cwd, err := os.Getwd(); err == nil {
+					storedMountPoint = filepath.Clean(filepath.Join(cwd, storedMountPoint))
+				}
+			}
+			if storedMountPoint != normalizedMountPoint {
+				continue
+			}
 		}
 
 		// Get backup size
