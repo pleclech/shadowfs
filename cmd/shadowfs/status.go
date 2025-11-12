@@ -184,8 +184,14 @@ func getMountStatus(mountPoint string) (*MountStatus, error) {
 			status = "active"
 		}
 
-		// Get mount ID
-		mountID := cache.ComputeMountID(normalizedMountPoint, daemonInfo.SourceDir)
+		// Normalize source directory to absolute path for consistent mount ID
+		normalizedSourceDir, err := filepath.Abs(daemonInfo.SourceDir)
+		if err != nil {
+			normalizedSourceDir = daemonInfo.SourceDir // Fallback to original if normalization fails
+		}
+		
+		// Get mount ID using normalized paths
+		mountID := cache.ComputeMountID(normalizedMountPoint, normalizedSourceDir)
 
 		// Find actual cache directory (may differ if paths were normalized differently)
 		cacheDir, err := rootinit.FindCacheDirectory(normalizedMountPoint)
@@ -423,6 +429,13 @@ func runInfoCommand(args []string) {
 	}
 	if !stats.StartedAt.IsZero() {
 		fmt.Printf("Started: %s\n", stats.StartedAt.Format("2006-01-02 15:04:05"))
+	}
+	// Show log file path for daemon mode
+	if stats.Status == "daemon" {
+		logFilePath, err := cache.GetDaemonLogFilePath(stats.MountID)
+		if err == nil {
+			fmt.Printf("Log File: %s\n", logFilePath)
+		}
 	}
 	fmt.Println()
 

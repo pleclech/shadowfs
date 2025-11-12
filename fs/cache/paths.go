@@ -72,3 +72,12 @@ func GetDaemonPIDFilePath(mountID string) (string, error) {
 	return filepath.Join(daemonDir, mountID+".pid"), nil
 }
 
+// GetDaemonLogFilePath returns the log file path for a mount ID
+func GetDaemonLogFilePath(mountID string) (string, error) {
+	daemonDir, err := GetDaemonDirPath()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(daemonDir, mountID+".log"), nil
+}
+

@@ -188,6 +188,18 @@ func checkMountPointAvailable(mountPoint string) error {
 
 // daemonize forks the process and runs in background
 func daemonize(mountPoint, sourceDir string) error {
+	// Normalize mount point and source directory to ensure consistent mount ID
+	normalizedMountPoint, err := rootinit.GetMountPoint(mountPoint)
+	if err != nil {
+		return fmt.Errorf("invalid mount point: %w", err)
+	}
+	
+	// Normalize source directory to absolute path
+	normalizedSourceDir, err := filepath.Abs(sourceDir)
+	if err != nil {
+		return fmt.Errorf("invalid source directory: %w", err)
+	}
+	
 	// Get the current executable path
 	execPath, err := os.Executable()
 	if err != nil {
@@ -204,10 +216,37 @@ func daemonize(mountPoint, sourceDir string) error {
 		args = append(args, arg)
 	}
 
+	// Compute mount ID using normalized paths (needed for log file path)
+	mountID := cache.ComputeMountID(normalizedMountPoint, normalizedSourceDir)
+	
+	// Get log file path and open it for writing
+	logFilePath, err := cache.GetDaemonLogFilePath(mountID)
+	var logFile *os.File
+	if err == nil {
+		// Ensure daemon directory exists
+		daemonDir, err := cache.GetDaemonDirPath()
+		if err == nil {
+			os.MkdirAll(daemonDir, 0755)
+		}
+		
+		// Open log file in append mode (create if doesn't exist)
+		logFile, err = os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			logFile = nil // Fallback to nil if we can't create log file
+		}
+	}
+
 	cmd := exec.Command(execPath, args...)
 	cmd.Stdin = nil
-	cmd.Stdout = nil
-	cmd.Stderr = nil
+	if logFile != nil {
+		// Redirect both stdout and stderr to log file
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+	} else {
+		// Fallback to nil if log file couldn't be created
+		cmd.Stdout = nil
+		cmd.Stderr = nil
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setsid: true, // Create new session
 	}
@@ -216,11 +255,15 @@ func daemonize(mountPoint, sourceDir string) error {
 	cmd.Env = append(os.Environ(), "SHADOWFS_DAEMON=1")
 
 	if err := cmd.Start(); err != nil {
+		if logFile != nil {
+			logFile.Close()
+		}
 		return fmt.Errorf("failed to start daemon process: %w", err)
 	}
 
-	// Compute mount ID to show actual PID file path
-	mountID := cache.ComputeMountID(mountPoint, sourceDir)
+	// Don't close logFile here - it needs to stay open for the daemon process
+	// The daemon process will close it when it exits
+
 	pidFilePath, err := cache.GetDaemonPIDFilePath(mountID)
 	if err != nil {
 		// Fallback if we can't get the path
@@ -230,11 +273,14 @@ func daemonize(mountPoint, sourceDir string) error {
 	// Print success message before exiting parent process
 	fmt.Printf("Daemon started successfully\n")
 	fmt.Printf("  PID: %d\n", cmd.Process.Pid)
-	fmt.Printf("  Mount Point: %s\n", mountPoint)
-	fmt.Printf("  Source Directory: %s\n", sourceDir)
+	fmt.Printf("  Mount Point: %s\n", normalizedMountPoint)
+	fmt.Printf("  Source Directory: %s\n", normalizedSourceDir)
 	fmt.Printf("  PID File: %s\n", pidFilePath)
+	if logFile != nil {
+		fmt.Printf("  Log File: %s\n", logFilePath)
+	}
 	fmt.Printf("\nUse 'shadowfs list' to see all active mounts\n")
-	fmt.Printf("Use 'shadowfs stop --mount-point %s' to stop the daemon\n", mountPoint)
+	fmt.Printf("Use 'shadowfs stop --mount-point %s' to stop the daemon\n", normalizedMountPoint)
 
 	// Exit parent process immediately
 	os.Exit(0)

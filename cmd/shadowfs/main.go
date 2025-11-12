@@ -120,9 +120,15 @@ func main() {
 		cacheDirPath = os.Getenv("SHADOWFS_CACHE_DIR")
 	}
 
-	// Initialize logger with debug level if debug flag is set
+	// Check if running as daemon child (set by daemonize)
+	isDaemonChild := os.Getenv("SHADOWFS_DAEMON") == "1"
+
+	// Initialize logger: Debug level if debug flag is set, Info level in daemon mode, otherwise default
 	if *debug {
 		shadowfs.InitLogger(shadowfs.LogLevelDebug)
+	} else if isDaemonChild {
+		// In daemon mode, initialize logger at Info level so important messages are logged
+		shadowfs.InitLogger(shadowfs.LogLevelInfo)
 	}
 
 	mountPoint := flag.Arg(0)
@@ -173,12 +179,16 @@ func main() {
 		}
 	}
 
-	// Write PID file if running as daemon (check env var set by daemonize)
-	isDaemonChild := os.Getenv("SHADOWFS_DAEMON") == "1"
+	// Write PID file if running as daemon
 	if *daemon || isDaemonChild {
 		mountID := root.GetMountID()
+		// Normalize source directory to absolute path for consistency
 		sourceDir := flag.Arg(1)
-		if err := writePIDFile(mountID, root.GetMountPoint(), sourceDir); err != nil {
+		normalizedSourceDir, err := filepath.Abs(sourceDir)
+		if err != nil {
+			normalizedSourceDir = sourceDir // Fallback to original if normalization fails
+		}
+		if err := writePIDFile(mountID, root.GetMountPoint(), normalizedSourceDir); err != nil {
 			log.Printf("Warning: Failed to write PID file: %v", err)
 		} else {
 			log.Printf("Daemon PID file written: %s", mountID)

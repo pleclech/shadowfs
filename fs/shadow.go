@@ -79,9 +79,33 @@ func (n *ShadowNode) HandleWriteActivity(filePath string) {
 		Debug("HandleWriteActivity: Using path as-is (not cache path): %s", filePath)
 	}
 
-	if n.activityTracker != nil {
+	// Find activity tracker by traversing up to root if current node doesn't have it
+	// This handles cases where nodes are created before InitGitManager is called
+	activityTracker := n.activityTracker
+	if activityTracker == nil {
+		// Try to get root node to find activity tracker
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					// Root() panicked - can't traverse up, skip tracking
+					Debug("HandleWriteActivity: Cannot access root node, skipping tracking for %s", mountPointPath)
+				}
+			}()
+			root := n.Root()
+			if root != nil {
+				if rootOps := root.Operations(); rootOps != nil {
+					if rootNode, ok := rootOps.(*ShadowNode); ok && rootNode.activityTracker != nil {
+						activityTracker = rootNode.activityTracker
+						Debug("HandleWriteActivity: Found activity tracker in root node")
+					}
+				}
+			}
+		}()
+	}
+
+	if activityTracker != nil {
 		Debug("HandleWriteActivity: Tracking activity for %s", mountPointPath)
-		n.activityTracker.MarkActivity(mountPointPath)
+		activityTracker.MarkActivity(mountPointPath)
 	} else {
 		Debug("HandleWriteActivity: Activity tracker is nil, cannot track %s", mountPointPath)
 	}
