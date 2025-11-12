@@ -673,6 +673,7 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 		if err == nil {
 			// File exists in cache - use it
 			// But if opening with O_APPEND and cache file is empty, copy source content first
+			copyOnWriteHappened := false
 			if hasAppend && st.Size == 0 {
 				var sourceSt syscall.Stat_t
 				if err := syscall.Lstat(p, &sourceSt); err == nil && sourceSt.Size > 0 {
@@ -686,10 +687,23 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 							return nil, 0, errno
 						}
 					}
+					copyOnWriteHappened = true
 				}
 			}
 			p = cachedPath
 			n.mirrorPath = cachedPath
+
+			// If copy-on-write happened, sync and track activity before opening file handle
+			if copyOnWriteHappened && forceCache {
+				// Open file temporarily to sync it, ensuring it's written to disk
+				// This ensures git can see the file when checking changes
+				if syncFd, err := syscall.Open(cachedPath, syscall.O_RDONLY, 0); err == nil {
+					syscall.Fsync(syncFd)
+					syscall.Close(syncFd)
+				}
+				// Track activity so git knows the file exists
+				n.HandleWriteActivity(cachedPath)
+			}
 		} else if forceCache {
 			// Need to create file in cache for write operations
 			// create directory if not exists recursively using same permissions
@@ -707,6 +721,7 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 
 			// Copy-on-write for append operations: if opening with O_APPEND and source has content,
 			// copy source content to cache before opening to preserve existing content
+			copyOnWriteHappened := false
 			if hasAppend {
 				var sourceSt syscall.Stat_t
 				if err := syscall.Lstat(p, &sourceSt); err == nil && sourceSt.Size > 0 {
@@ -723,6 +738,7 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 					// File already exists in cache now, don't need O_CREAT
 					p = cachedPath
 					n.mirrorPath = cachedPath
+					copyOnWriteHappened = true
 				} else {
 					// Source doesn't exist or is empty - create empty file in cache
 					flags = flags | syscall.O_CREAT
@@ -735,6 +751,18 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 				p = cachedPath
 				n.mirrorPath = cachedPath
 			}
+
+			// If copy-on-write happened, sync and track activity before opening file handle
+			if copyOnWriteHappened {
+				// Open file temporarily to sync it, ensuring it's written to disk
+				// This ensures git can see the file when checking changes
+				if syncFd, err := syscall.Open(cachedPath, syscall.O_RDONLY, 0); err == nil {
+					syscall.Fsync(syncFd)
+					syscall.Close(syncFd)
+				}
+				// Track activity so git knows the file exists
+				n.HandleWriteActivity(cachedPath)
+			}
 		} else {
 			// Read-only: use source file directly (no copy needed, no permission check needed)
 			// p already points to source path
@@ -746,6 +774,7 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 		if err == nil {
 			// File exists in cache
 			// But if opening with O_APPEND and cache file is empty, copy source content first
+			copyOnWriteHappened := false
 			if hasAppend && st.Size == 0 {
 				sourcePath := n.RebasePathUsingSrc(p)
 				var sourceSt syscall.Stat_t
@@ -760,7 +789,20 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 							return nil, 0, errno
 						}
 					}
+					copyOnWriteHappened = true
 				}
+			}
+
+			// If copy-on-write happened, sync and track activity before opening file handle
+			if copyOnWriteHappened && forceCache {
+				// Open file temporarily to sync it, ensuring it's written to disk
+				// This ensures git can see the file when checking changes
+				if syncFd, err := syscall.Open(p, syscall.O_RDONLY, 0); err == nil {
+					syscall.Fsync(syncFd)
+					syscall.Close(syncFd)
+				}
+				// Track activity so git knows the file exists
+				n.HandleWriteActivity(p)
 			}
 		} else {
 			// CRITICAL: File doesn't exist at current mirrorPath
