@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -52,13 +51,9 @@ func validateCommitHash(gm *shadowfs.GitManager, hash string) error {
 		return fmt.Errorf("invalid commit hash format (must be 7-40 hex characters): %s", hash)
 	}
 
-	// Check if commit exists in repository
-	workspacePath := gm.GetWorkspacePath()
-	// git init creates .gitofs/.git/, so use .gitofs/.git for --git-dir
-	gitDir := filepath.Join(workspacePath, ".gitofs", ".git")
-	cmd := exec.Command("git", "--git-dir", gitDir, "-C", workspacePath, "cat-file", "-e", hash)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("commit hash does not exist in repository: %s", hash)
+	// Check if commit exists in repository using GitManager
+	if err := gm.ValidateCommitHash(hash); err != nil {
+		return err
 	}
 
 	return nil

@@ -3,6 +3,7 @@ package fs
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -167,5 +168,257 @@ func TestActivityTracker_IdleDetection(t *testing.T) {
 	// Check if file is considered idle
 	if !at.IsIdle(testFile) {
 		t.Errorf("File should be considered idle after timeout")
+	}
+}
+
+func TestGitManager_StatusPorcelain(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "git-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	gm := NewGitManager(tempDir, "/tmp/source", GitConfig{
+		AutoCommit: true,
+	})
+
+	// Initialize Git repository
+	err = gm.InitializeRepo()
+	if err != nil {
+		t.Skipf("Git not available, skipping test: %v", err)
+		return
+	}
+
+	// Create a test file
+	testFile := filepath.Join(tempDir, "test.txt")
+	content := []byte("test content")
+	err = os.WriteFile(testFile, content, 0644)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Test StatusPorcelain - should return the changed file
+	changedFiles, err := gm.StatusPorcelain()
+	if err != nil {
+		t.Errorf("StatusPorcelain failed: %v", err)
+	}
+
+	// Should have at least one changed file (test.txt)
+	if len(changedFiles) == 0 {
+		t.Error("Expected at least one changed file, got none")
+	}
+
+	// Check if test.txt is in the list
+	found := false
+	for _, file := range changedFiles {
+		if file == "test.txt" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("Expected test.txt in changed files, got: %v", changedFiles)
+	}
+}
+
+func TestGitManager_ValidateCommitHash(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "git-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	gm := NewGitManager(tempDir, "/tmp/source", GitConfig{
+		AutoCommit: true,
+	})
+
+	// Initialize Git repository
+	err = gm.InitializeRepo()
+	if err != nil {
+		t.Skipf("Git not available, skipping test: %v", err)
+		return
+	}
+
+	// Create and commit a test file
+	testFile := filepath.Join(tempDir, "test.txt")
+	content := []byte("test content")
+	err = os.WriteFile(testFile, content, 0644)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Commit the file
+	err = gm.CommitFileSync(testFile, "test commit")
+	if err != nil {
+		t.Skipf("Failed to commit file, skipping test: %v", err)
+		return
+	}
+
+	// Get the commit hash (HEAD)
+	// We'll use a simple approach: validate HEAD exists
+	err = gm.ValidateCommitHash("HEAD")
+	if err != nil {
+		t.Errorf("ValidateCommitHash(HEAD) failed: %v", err)
+	}
+
+	// Test with invalid hash
+	err = gm.ValidateCommitHash("0000000000000000000000000000000000000000")
+	if err == nil {
+		t.Error("ValidateCommitHash should fail for invalid hash")
+	}
+}
+
+func TestGitManager_Log(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "git-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	gm := NewGitManager(tempDir, "/tmp/source", GitConfig{
+		AutoCommit: true,
+	})
+
+	// Initialize Git repository
+	err = gm.InitializeRepo()
+	if err != nil {
+		t.Skipf("Git not available, skipping test: %v", err)
+		return
+	}
+
+	// Create and commit a test file
+	testFile := filepath.Join(tempDir, "test.txt")
+	content := []byte("test content")
+	err = os.WriteFile(testFile, content, 0644)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Commit the file
+	err = gm.CommitFileSync(testFile, "test commit")
+	if err != nil {
+		t.Skipf("Failed to commit file, skipping test: %v", err)
+		return
+	}
+
+	// Test Log with oneline option
+	var output strings.Builder
+	options := LogOptions{Oneline: true, Limit: 1}
+	err = gm.Log(options, &output)
+	if err != nil {
+		t.Errorf("Log failed: %v", err)
+	}
+
+	if output.Len() == 0 {
+		t.Error("Log output should not be empty")
+	}
+}
+
+func TestGitManager_Diff(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "git-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	gm := NewGitManager(tempDir, "/tmp/source", GitConfig{
+		AutoCommit: true,
+	})
+
+	// Initialize Git repository
+	err = gm.InitializeRepo()
+	if err != nil {
+		t.Skipf("Git not available, skipping test: %v", err)
+		return
+	}
+
+	// Create and commit a test file
+	testFile := filepath.Join(tempDir, "test.txt")
+	content := []byte("test content")
+	err = os.WriteFile(testFile, content, 0644)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Commit the file
+	err = gm.CommitFileSync(testFile, "test commit")
+	if err != nil {
+		t.Skipf("Failed to commit file, skipping test: %v", err)
+		return
+	}
+
+	// Modify the file
+	err = os.WriteFile(testFile, []byte("modified content"), 0644)
+	if err != nil {
+		t.Fatalf("Failed to modify test file: %v", err)
+	}
+
+	// Test Diff
+	var output strings.Builder
+	options := DiffOptions{Stat: false, CommitArgs: []string{"HEAD"}, Paths: []string{"test.txt"}}
+	err = gm.Diff(options, &output)
+	if err != nil {
+		t.Errorf("Diff failed: %v", err)
+	}
+
+	if output.Len() == 0 {
+		t.Error("Diff output should not be empty for modified file")
+	}
+}
+
+func TestGitManager_Checkout(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "git-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	gm := NewGitManager(tempDir, "/tmp/source", GitConfig{
+		AutoCommit: true,
+	})
+
+	// Initialize Git repository
+	err = gm.InitializeRepo()
+	if err != nil {
+		t.Skipf("Git not available, skipping test: %v", err)
+		return
+	}
+
+	// Create and commit a test file
+	testFile := filepath.Join(tempDir, "test.txt")
+	content := []byte("original content")
+	err = os.WriteFile(testFile, content, 0644)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Commit the file
+	err = gm.CommitFileSync(testFile, "test commit")
+	if err != nil {
+		t.Skipf("Failed to commit file, skipping test: %v", err)
+		return
+	}
+
+	// Modify the file
+	err = os.WriteFile(testFile, []byte("modified content"), 0644)
+	if err != nil {
+		t.Fatalf("Failed to modify test file: %v", err)
+	}
+
+	// Test Checkout to restore from HEAD
+	var stdout, stderr strings.Builder
+	err = gm.Checkout("HEAD", []string{"test.txt"}, false, &stdout, &stderr)
+	if err != nil {
+		t.Errorf("Checkout failed: %v", err)
+	}
+
+	// Verify file was restored
+	restoredContent, err := os.ReadFile(testFile)
+	if err != nil {
+		t.Fatalf("Failed to read restored file: %v", err)
+	}
+
+	if string(restoredContent) != "original content" {
+		t.Errorf("Expected 'original content', got '%s'", string(restoredContent))
 	}
 }

@@ -1,13 +1,10 @@
 package main
 
 import (
-	"bufio"
 	"flag"
 	"fmt"
 	"log"
-	"os/exec"
 	"path/filepath"
-	"strings"
 
 	shadowfs "github.com/pleclech/shadowfs/fs"
 )
@@ -83,45 +80,6 @@ func runCheckpointCommand(args []string) {
 
 // discoverChangedFiles discovers all files with uncommitted changes using git status
 func discoverChangedFiles(gm *shadowfs.GitManager) ([]string, error) {
-	workspacePath := gm.GetWorkspacePath()
-	// git init creates .gitofs/.git/, so use .gitofs/.git for --git-dir
-	gitDir := filepath.Join(workspacePath, ".gitofs", ".git")
-
-	// Use git status --porcelain to get list of changed files
-	cmd := exec.Command("git", "--git-dir", gitDir, "-C", workspacePath, "status", "--porcelain")
-	output, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("failed to run git status: %w", err)
-	}
-
-	var changedFiles []string
-	scanner := bufio.NewScanner(strings.NewReader(string(output)))
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-
-		// git status --porcelain format: XY filename
-		// X = status of index, Y = status of work tree
-		// We want files that are modified (M), added (A), or untracked (?)
-		parts := strings.Fields(line)
-		if len(parts) < 2 {
-			continue
-		}
-
-		status := parts[0]
-		filePath := parts[1]
-
-		// Check if file has changes (M=modified, A=added, ??=untracked)
-		if strings.Contains(status, "M") || strings.Contains(status, "A") || status == "??" {
-			changedFiles = append(changedFiles, filePath)
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("failed to parse git status output: %w", err)
-	}
-
-	return changedFiles, nil
+	// Use GitManager's StatusPorcelain method
+	return gm.StatusPorcelain()
 }

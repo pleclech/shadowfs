@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 
 	shadowfs "github.com/pleclech/shadowfs/fs"
@@ -92,31 +90,23 @@ func runVersionList(args []string) {
 		pathPatterns = append(pathPatterns, fs.Args()...)
 	}
 
-	// Build git log command
-	// git init creates .gitofs/.git/, so use .gitofs/.git for --git-dir
-	gitDir := filepath.Join(gm.GetWorkspacePath(), ".gitofs", ".git")
-	cmdArgs := []string{"--git-dir", gitDir, "-C", gm.GetWorkspacePath(), "log", "--pretty=format:%h %ad %s", "--date=short"}
-	
-	// Expand glob patterns and add paths to git command
+	// Expand glob patterns
+	var expandedPaths []string
 	if len(pathPatterns) > 0 {
-		expandedPaths, err := shadowfs.ExpandGlobPatterns(gm.GetWorkspacePath(), pathPatterns)
+		var err error
+		expandedPaths, err = shadowfs.ExpandGlobPatterns(gm.GetWorkspacePath(), pathPatterns)
 		if err != nil {
 			log.Fatalf("Failed to expand patterns: %v", err)
 		}
-		if len(expandedPaths) > 0 {
-			cmdArgs = append(cmdArgs, "--")
-			cmdArgs = append(cmdArgs, expandedPaths...)
-		}
 	}
 
-	if *limit > 0 {
-		cmdArgs = append(cmdArgs, fmt.Sprintf("-%d", *limit))
+	// Use GitManager's Log method
+	options := shadowfs.LogOptions{
+		Format: "%h %ad %s",
+		Limit:  *limit,
+		Paths:  expandedPaths,
 	}
-
-	cmd := exec.Command("git", cmdArgs...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := gm.Log(options, os.Stdout); err != nil {
 		log.Fatalf("Failed to run git log: %v", err)
 	}
 }
@@ -185,31 +175,23 @@ func runVersionDiff(args []string) {
 		}
 	}
 
-	// Build git diff command
-	// git init creates .gitofs/.git/, so use .gitofs/.git for --git-dir
-	gitDir := filepath.Join(gm.GetWorkspacePath(), ".gitofs", ".git")
-	cmdArgs := []string{"--git-dir", gitDir, "-C", gm.GetWorkspacePath(), "diff"}
-	if *stat {
-		cmdArgs = append(cmdArgs, "--stat")
-	}
-	cmdArgs = append(cmdArgs, commitArgs...)
-	
-	// Expand glob patterns and add paths to git command
+	// Expand glob patterns
+	var expandedPaths []string
 	if len(pathPatterns) > 0 {
-		expandedPaths, err := shadowfs.ExpandGlobPatterns(gm.GetWorkspacePath(), pathPatterns)
+		var err error
+		expandedPaths, err = shadowfs.ExpandGlobPatterns(gm.GetWorkspacePath(), pathPatterns)
 		if err != nil {
 			log.Fatalf("Failed to expand patterns: %v", err)
 		}
-		if len(expandedPaths) > 0 {
-			cmdArgs = append(cmdArgs, "--")
-			cmdArgs = append(cmdArgs, expandedPaths...)
-		}
 	}
 
-	cmd := exec.Command("git", cmdArgs...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	// Use GitManager's Diff method
+	options := shadowfs.DiffOptions{
+		Stat:       *stat,
+		CommitArgs: commitArgs,
+		Paths:      expandedPaths,
+	}
+	if err := gm.Diff(options, os.Stdout); err != nil {
 		log.Fatalf("Failed to run git diff: %v", err)
 	}
 }
@@ -265,20 +247,8 @@ func runVersionRestore(args []string) {
 		paths = []string{"."}
 	}
 
-	// Build git checkout command
-	// git init creates .gitofs/.git/, so use .gitofs/.git for --git-dir
-	gitDir := filepath.Join(gm.GetWorkspacePath(), ".gitofs", ".git")
-	cmdArgs := []string{"--git-dir", gitDir, "-C", gm.GetWorkspacePath(), "checkout"}
-	if *force {
-		cmdArgs = append(cmdArgs, "-f")
-	}
-	cmdArgs = append(cmdArgs, commitHash, "--")
-	cmdArgs = append(cmdArgs, paths...)
-
-	cmd := exec.Command("git", cmdArgs...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	// Use GitManager's Checkout method
+	if err := gm.Checkout(commitHash, paths, *force, os.Stdout, os.Stderr); err != nil {
 		log.Fatalf("Failed to restore: %v", err)
 	}
 
@@ -328,36 +298,24 @@ func runVersionLog(args []string) {
 		pathPatterns = append(pathPatterns, fs.Args()...)
 	}
 
-	// Build git log command
-	// git init creates .gitofs/.git/, so use .gitofs/.git for --git-dir
-	gitDir := filepath.Join(gm.GetWorkspacePath(), ".gitofs", ".git")
-	cmdArgs := []string{"--git-dir", gitDir, "-C", gm.GetWorkspacePath(), "log"}
-	if *oneline {
-		cmdArgs = append(cmdArgs, "--oneline")
-	}
-	if *graph {
-		cmdArgs = append(cmdArgs, "--graph")
-	}
-	if *stat {
-		cmdArgs = append(cmdArgs, "--stat")
-	}
-	
-	// Expand glob patterns and add paths to git command
+	// Expand glob patterns
+	var expandedPaths []string
 	if len(pathPatterns) > 0 {
-		expandedPaths, err := shadowfs.ExpandGlobPatterns(gm.GetWorkspacePath(), pathPatterns)
+		var err error
+		expandedPaths, err = shadowfs.ExpandGlobPatterns(gm.GetWorkspacePath(), pathPatterns)
 		if err != nil {
 			log.Fatalf("Failed to expand patterns: %v", err)
 		}
-		if len(expandedPaths) > 0 {
-			cmdArgs = append(cmdArgs, "--")
-			cmdArgs = append(cmdArgs, expandedPaths...)
-		}
 	}
 
-	cmd := exec.Command("git", cmdArgs...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	// Use GitManager's Log method
+	options := shadowfs.LogOptions{
+		Oneline: *oneline,
+		Graph:   *graph,
+		Stat:    *stat,
+		Paths:   expandedPaths,
+	}
+	if err := gm.Log(options, os.Stdout); err != nil {
 		log.Fatalf("Failed to run git log: %v", err)
 	}
 }

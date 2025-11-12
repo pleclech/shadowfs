@@ -2,6 +2,7 @@ package fs
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -491,4 +492,144 @@ func (gm *GitManager) IsEnabled() bool {
 // GetConfig returns the Git configuration
 func (gm *GitManager) GetConfig() GitConfig {
 	return gm.config
+}
+
+// LogOptions contains options for git log command
+type LogOptions struct {
+	Format  string   // Custom format string (e.g., "%h %ad %s")
+	Oneline bool     // Use --oneline flag
+	Graph   bool     // Use --graph flag
+	Stat    bool     // Use --stat flag
+	Limit   int      // Limit number of commits (0 = no limit)
+	Paths   []string // Paths to filter commits
+	Since   string   // Show commits since date/time
+}
+
+// DiffOptions contains options for git diff command
+type DiffOptions struct {
+	Stat       bool     // Use --stat flag
+	CommitArgs []string // Commit arguments (e.g., "HEAD~1", "HEAD")
+	Paths      []string // Paths to filter diff
+}
+
+// executeGitCommand executes a git command with consistent --git-dir and -C flags
+func (gm *GitManager) executeGitCommand(args []string, stdout, stderr io.Writer) error {
+	// Build command with consistent git directory and working directory
+	cmdArgs := []string{"--git-dir", gm.gitDir, "-C", gm.gitWorkDir}
+	cmdArgs = append(cmdArgs, args...)
+	
+	cmd := exec.Command("git", cmdArgs...)
+	if stdout != nil {
+		cmd.Stdout = stdout
+	}
+	if stderr != nil {
+		cmd.Stderr = stderr
+	}
+	
+	return cmd.Run()
+}
+
+// StatusPorcelain returns a list of changed files using git status --porcelain
+func (gm *GitManager) StatusPorcelain() ([]string, error) {
+	var output strings.Builder
+	err := gm.executeGitCommand([]string{"status", "--porcelain"}, &output, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to run git status: %w", err)
+	}
+	
+	var changedFiles []string
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		// Parse porcelain format: XY filename
+		// Extract filename (skip status characters and space)
+		parts := strings.Fields(line)
+		if len(parts) >= 2 {
+			// Join all parts after status to handle filenames with spaces
+			filename := strings.Join(parts[1:], " ")
+			changedFiles = append(changedFiles, filename)
+		}
+	}
+	
+	return changedFiles, nil
+}
+
+// ValidateCommitHash checks if a commit hash exists in the repository
+func (gm *GitManager) ValidateCommitHash(hash string) error {
+	err := gm.executeGitCommand([]string{"cat-file", "-e", hash}, nil, nil)
+	if err != nil {
+		return fmt.Errorf("commit hash does not exist in repository: %s", hash)
+	}
+	return nil
+}
+
+// Log executes git log with the provided options and writes output to stdout
+func (gm *GitManager) Log(options LogOptions, stdout io.Writer) error {
+	args := []string{"log"}
+	
+	if options.Format != "" {
+		args = append(args, "--pretty=format:"+options.Format)
+	} else if options.Oneline {
+		args = append(args, "--oneline")
+	} else {
+		args = append(args, "--pretty=format:%h %ad %s", "--date=short")
+	}
+	
+	if options.Graph {
+		args = append(args, "--graph")
+	}
+	
+	if options.Stat {
+		args = append(args, "--stat")
+	}
+	
+	if options.Since != "" {
+		args = append(args, "--since="+options.Since)
+	}
+	
+	if options.Limit > 0 {
+		args = append(args, fmt.Sprintf("-%d", options.Limit))
+	}
+	
+	if len(options.Paths) > 0 {
+		args = append(args, "--")
+		args = append(args, options.Paths...)
+	}
+	
+	return gm.executeGitCommand(args, stdout, nil)
+}
+
+// Diff executes git diff with the provided options and writes output to stdout
+func (gm *GitManager) Diff(options DiffOptions, stdout io.Writer) error {
+	args := []string{"diff"}
+	
+	if options.Stat {
+		args = append(args, "--stat")
+	}
+	
+	// Add commit arguments (e.g., "HEAD~1", "HEAD")
+	args = append(args, options.CommitArgs...)
+	
+	if len(options.Paths) > 0 {
+		args = append(args, "--")
+		args = append(args, options.Paths...)
+	}
+	
+	return gm.executeGitCommand(args, stdout, nil)
+}
+
+// Checkout executes git checkout to restore files from a specific commit
+func (gm *GitManager) Checkout(commitHash string, paths []string, force bool, stdout, stderr io.Writer) error {
+	args := []string{"checkout"}
+	
+	if force {
+		args = append(args, "-f")
+	}
+	
+	args = append(args, commitHash, "--")
+	args = append(args, paths...)
+	
+	return gm.executeGitCommand(args, stdout, stderr)
 }
