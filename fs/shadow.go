@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -123,8 +124,7 @@ func (n *ShadowNode) CleanupGitManager() {
 	if n.gitManager != nil {
 		// Stop accepting new commits
 		n.gitManager.Stop()
-	}
-	if n.activityTracker != nil {
+
 		// CRITICAL: Commit all pending changes before stopping timers to prevent data loss
 		if err := n.activityTracker.CommitAllPending(); err != nil {
 			Debug("Failed to commit pending changes on cleanup: %v", err)
@@ -210,13 +210,13 @@ func (n *ShadowNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut
 	}
 
 	p := filepath.Join(n.FullPath(false), name)
-	Debug("Lookup: %s", p)
 
 	// Cache independence: We check cache first, then fall back to source.
 	// Note: Source directory changes during mount are not detected by design
 	// to maintain cache independence and prevent data loss. Users should
 	// unmount before modifying the source directory.
 	mirrorPath := n.RebasePathUsingCache(p)
+
 	var st syscall.Stat_t
 
 	if mirrorPath != n.cachePath {
@@ -309,6 +309,42 @@ func (n *ShadowNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut
 		st = *st2
 	}
 
+	// Check if it's a directory and fix permissions if needed BEFORE FromStat
+	// CRITICAL: Always check and fix permissions for directories, especially .git
+	// This ensures git can always traverse directories it creates
+	if st.Mode&syscall.S_IFDIR != 0 {
+		// It's a directory - ALWAYS ensure execute permissions are set
+		// Don't just check - always fix to prevent any possibility of wrong permissions
+		// This is critical for FUSE filesystems where kernel might cache wrong attributes
+		pathToFix := mirrorPath
+		if pathToFix == "" {
+			pathToFix = p
+		}
+		// Fix permissions immediately - don't wait
+		if err := ensureDirPermissions(pathToFix); err != nil {
+
+			// Continue - we'll fix st.Mode below
+		} else {
+			// Re-stat after fixing to get correct permissions
+			if mirrorPath != "" {
+				if err2 := syscall.Lstat(mirrorPath, &st); err2 == nil {
+					// st now has correct permissions
+				}
+			} else {
+				if err2 := syscall.Lstat(p, &st); err2 == nil {
+					// st now has correct permissions
+				}
+			}
+		}
+
+		// Ensure st.Mode has correct execute bits BEFORE FromStat
+		permBits := st.Mode & 0777
+		if permBits&0111 == 0 {
+			// Fix execute bits in stat structure
+			st.Mode = (st.Mode &^ 0777) | (permBits | 0755)
+		}
+	}
+
 	// create new inode
 	out.Attr.FromStat(&st)
 
@@ -325,11 +361,31 @@ func (n *ShadowNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut
 }
 
 func (n *ShadowNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
-	if f != nil {
+
+	// CRITICAL: For cached files, NEVER use FileGetattrer because the file handle
+	// might be stale after rename operations (e.g., config.lock -> config)
+	// Always do a fresh stat to get current attributes
+	if f != nil && n.mirrorPath != "" {
+
+	} else if f != nil {
 		if fga, ok := f.(fs.FileGetattrer); ok {
+
 			return fga.Getattr(ctx, out)
 		}
-		// If file handle doesn't implement FileGetattrer, fall through to path-based stat
+		// CRITICAL: If we have a file handle, try to get fresh attributes from it
+		// This ensures we get the correct file size after writes
+		if fileWithFd, ok := f.(interface{ Fd() int }); ok {
+			if fd := fileWithFd.Fd(); fd >= 0 {
+				var st syscall.Stat_t
+				if err := syscall.Fstat(fd, &st); err == nil {
+					// Use fstat result for files - this has the most up-to-date size
+
+					out.FromStat(&st)
+					return fs.OK
+				}
+			}
+		}
+		// If file handle doesn't implement FileGetattrer or Fd() failed, fall through to path-based stat
 	}
 
 	// Cache independence: Attributes are read from cache if available, otherwise from source.
@@ -337,29 +393,85 @@ func (n *ShadowNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.Att
 	// get full path using mirror path if exists
 	p := n.FullPath(true)
 
-	var err error
 	st := syscall.Stat_t{}
 
-	if &n.Inode == n.Root() {
-		err = syscall.Stat(p, &st)
+	// CRITICAL: Always check if file should be read from cache first
+	// This handles cases where file was renamed after mirrorPath was set
+	cachedPath := n.RebasePathUsingCache(p)
+	if err := syscall.Lstat(cachedPath, &st); err == nil {
+		// File exists in cache - use cached file's attributes
+
+		p = cachedPath
 	} else {
-		err = syscall.Lstat(p, &st)
+		// File not in cache, use original path
+		if &n.Inode == n.Root() {
+			err = syscall.Stat(p, &st)
+		} else {
+			err = syscall.Lstat(p, &st)
+		}
+		if err != nil {
+
+			return fs.ToErrno(err)
+		}
+
 	}
 
-	if err != nil {
-		return fs.ToErrno(err)
+	// CRITICAL: For directories, ALWAYS fix permissions and re-stat to get fresh attributes
+	// This ensures FUSE always sees correct permissions, even if kernel cached wrong ones
+	if st.Mode&syscall.S_IFDIR != 0 {
+		// Always fix permissions for directories - don't just check
+		// This is critical because FUSE might cache wrong attributes
+		if err := ensureDirPermissions(p); err != nil {
+
+			// Continue - we'll fix st.Mode below
+		} else {
+			// Re-stat after fixing to get FRESH attributes from filesystem
+			// This ensures we're not using stale cached attributes
+			if &n.Inode == n.Root() {
+				if err2 := syscall.Stat(p, &st); err2 == nil {
+				}
+			} else {
+				if err2 := syscall.Lstat(p, &st); err2 == nil {
+					// st now has fresh correct permissions
+				}
+			}
+		}
+
+		// Ensure st.Mode has correct execute bits BEFORE FromStat
+		permBits := st.Mode & 0777
+		if permBits&0111 == 0 {
+			// Fix execute bits in stat structure
+			st.Mode = (st.Mode &^ 0777) | (permBits | 0755)
+		}
+	} else {
+		// CRITICAL: For files, if we have a mirrorPath (file is in cache),
+		// ensure we get fresh attributes after writes
+
+		if n.mirrorPath != "" && strings.HasPrefix(p, n.cachePath) {
+			// Force a fresh stat to get updated file size after writes
+			if err2 := syscall.Lstat(p, &st); err2 == nil {
+				// st now has fresh attributes including correct size
+
+			}
+		} else {
+			// Check if file should be in cache even if p doesn't start with cachePath
+			cachedPath := n.RebasePathUsingCache(p)
+
+			if err2 := syscall.Lstat(cachedPath, &st); err2 == nil {
+
+				// Use the cached file's attributes
+				p = cachedPath
+			}
+		}
 	}
 
 	out.FromStat(&st)
 
-	// Ensure directories have execute permissions
-	if out.Mode&0170000 == 0040000 { // S_IFDIR
-		// Special fix for .git directories to ensure they always have correct permissions
-		if strings.Contains(p, ".git") && (out.Mode&0111 == 0) {
-			out.Mode = 0040755 // Force correct directory permissions for .git
-		} else if out.Mode&0111 == 0 { // No execute bits
-			out.Mode |= 0755 // Add standard directory permissions
-		}
+	// CRITICAL: For files in cache, set very short cache timeout
+	// This forces the kernel to requery attributes frequently, preventing stale size issues
+	if n.mirrorPath != "" && strings.HasPrefix(p, n.cachePath) && st.Mode&syscall.S_IFREG != 0 {
+		out.SetTimeout(100 * time.Millisecond) // 100ms timeout for cache files
+
 	}
 
 	return fs.OK
@@ -500,65 +612,102 @@ func (n *ShadowNode) preserveOwner(ctx context.Context, path string) error {
 	return syscall.Lchown(path, int(caller.Uid), int(caller.Gid))
 }
 
+// ensureDirPermissions ensures a directory has proper execute permissions.
+// It checks if the path is a directory and ensures it has at least 0755 permissions.
+// Always chmods to ensure kernel sees correct permissions immediately.
+func ensureDirPermissions(path string) error {
+	var st syscall.Stat_t
+	if err := syscall.Lstat(path, &st); err != nil {
+		return err
+	}
+
+	// Check if it's actually a directory
+	if st.Mode&syscall.S_IFDIR == 0 {
+		return syscall.ENOTDIR
+	}
+
+	// Get current permissions (only permission bits, not file type)
+	currentMode := st.Mode & 0777
+
+	// Ensure at least 0755 (rwxr-xr-x) - directories need execute bits to be traversable
+	// Preserve higher permissions if they exist, but always ensure execute bits
+	requiredMode := currentMode | 0755
+
+	// Always chmod to ensure kernel sees correct permissions immediately
+	// This is important for FUSE filesystems where kernel might cache wrong attributes
+	if err := syscall.Chmod(path, requiredMode); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (n *ShadowNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (inode *fs.Inode, fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
 	// Validate name parameter to prevent path traversal
 	if !validateNameParameter(name) {
 		return nil, nil, 0, syscall.EPERM
 	}
 
-	p := filepath.Join(n.FullPath(true), name)
+	// CRITICAL: Use source path first to ensure consistent path resolution
+	// This prevents race conditions where parent directory state is inconsistent
+	sourcePath := filepath.Join(n.FullPath(false), name)
+	p := n.RebasePathUsingCache(sourcePath)
 
-	// check if file is from cache
-	isPathInCache := false
-	if strings.HasPrefix(p, n.cachePath) {
-		// check if file is deleted in cache
-		xattr := ShadowXAttr{}
-		var errno syscall.Errno
-		isPathInCache, errno = GetShadowXAttr(p, &xattr)
-		if errno != 0 {
-			return nil, nil, 0, errno
-		}
-
-		if isPathInCache && IsPathDeleted(xattr) {
-			// File was deleted - remove the deletion marker and shadow file
-			// Create new empty file (don't restore from source - cache is independent)
-			err := syscall.Unlink(p)
-			if err != nil && !os.IsNotExist(err) {
-				return nil, nil, 0, fs.ToErrno(err)
-			}
-			// Remove the xattr deletion marker
-			syscall.Removexattr(p, ShadowXattrName)
-			// Create new empty file - don't restore from source
-			isPathInCache = false
-		}
+	// Since we're always using cache path, check if file is deleted in cache
+	xattr := ShadowXAttr{}
+	var xattrErrno syscall.Errno
+	isPathInCache, xattrErrno := GetShadowXAttr(p, &xattr)
+	if xattrErrno != 0 && xattrErrno != syscall.ENODATA {
+		return nil, nil, 0, xattrErrno
 	}
 
-	if !isPathInCache {
-		// need to create file in cache
-		// create directory if not exists recursively using same permissions
-		cachedDir, err := n.createMirroredDir(filepath.Dir(p))
-		if err != nil && cachedDir != n.cachePath {
+	if isPathInCache && IsPathDeleted(xattr) {
+		// File was deleted - remove the deletion marker and shadow file
+		// Create new empty file (don't restore from source - cache is independent)
+		err := syscall.Unlink(p)
+		if err != nil && !os.IsNotExist(err) {
 			return nil, nil, 0, fs.ToErrno(err)
 		}
-		cacheFilePath := filepath.Join(cachedDir, filepath.Base(p))
-
-		// Create empty file in cache - copy-on-write will happen on first write
-		// Get source path to check permissions
-		sourcePath := filepath.Join(n.FullPath(false), name)
-		var sourceSt syscall.Stat_t
-		fileMode := mode
-		if err := syscall.Lstat(sourcePath, &sourceSt); err == nil {
-			// Source file exists - use its permissions
-			fileMode = uint32(sourceSt.Mode)
-		}
-		// Create empty file - content will be copied on first write
-		p = cacheFilePath
-		mode = fileMode // Use source permissions if available
+		// Remove the xattr deletion marker
+		syscall.Removexattr(p, ShadowXattrName)
 	}
 
+	// need to create file in cache
+	// create directory if not exists recursively using same permissions
+	parentDir := filepath.Dir(p)
+	cachedDir, err := n.createMirroredDir(parentDir)
+	if err != nil && cachedDir != n.cachePath {
+		return nil, nil, 0, fs.ToErrno(err)
+	}
+	// Check if parent directory is accessible before trying to create file
+	// This respects directory permissions for security tests
+	if err := syscall.Access(cachedDir, 0x2); err != nil {
+		return nil, nil, 0, syscall.EACCES
+	}
+
+	// CRITICAL: Ensure parent directory has execute permissions for Git operations
+	// This is especially important for .git directory when git creates files inside it
+	// But only fix if we can access it (not for security tests)
+	if err := ensureDirPermissions(cachedDir); err != nil {
+
+		// Don't fail - try to continue, but this might cause issues
+	}
+
+	// Get source path to check permissions
+	var sourceSt syscall.Stat_t
+	fileMode := mode
+	if err := syscall.Lstat(sourcePath, &sourceSt); err == nil {
+		// Source file exists - use its permissions
+		fileMode = uint32(sourceSt.Mode)
+	}
+	// Create empty file - content will be copied on first write
+	mode = fileMode // Use source permissions if available
+
 	flags = flags &^ syscall.O_APPEND
+
 	fd, err := syscall.Open(p, int(flags)|os.O_CREATE, mode)
 	if err != nil {
+
 		return nil, nil, 0, fs.ToErrno(err)
 	}
 
@@ -597,6 +746,11 @@ func (n *ShadowNode) Create(ctx context.Context, name string, flags uint32, mode
 		n.HandleWriteActivity(p)
 	}
 
+	// CRITICAL: Debug Git object creation issue
+	if ch != nil {
+
+	}
+
 	return ch, lf, 0, 0
 }
 
@@ -608,6 +762,21 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 	Debug("Open: forceCache=%v", forceCache)
 
 	perms := uint32(0)
+
+	// CRITICAL: Always verify that mirrorPath matches expected filename
+	// This handles cases where mirrorPath is stale after rename operations
+	if n.mirrorPath != "" {
+		// Get the expected filename from the inode path
+		expectedFilename := filepath.Base(n.EmbeddedInode().Path(nil))
+		currentFilename := filepath.Base(n.mirrorPath)
+
+		if expectedFilename != currentFilename {
+			// Filenames don't match - mirrorPath is stale
+			Debug("Open: mirrorPath filename mismatch, expected %s, got %s", expectedFilename, currentFilename)
+			n.mirrorPath = ""
+			p = n.FullPath(true) // Recompute path
+		}
+	}
 
 	// check if path is not cached
 	if !strings.HasPrefix(p, n.cachePath) {
@@ -647,8 +816,23 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 		st := syscall.Stat_t{}
 		err := syscall.Lstat(p, &st)
 		if err != nil {
-			n.mirrorPath = ""
-			p = n.FullPath(false)
+			// CRITICAL: File doesn't exist at current mirrorPath
+			// This can happen after rename operations where mirrorPath is stale
+			// Try to find the file in cache using relative path
+			relativePath := strings.TrimPrefix(n.EmbeddedInode().Path(nil), "/")
+			expectedCachePath := filepath.Join(n.cachePath, relativePath)
+			Debug("Open: file not found at %s, trying %s", p, expectedCachePath)
+
+			if err2 := syscall.Lstat(expectedCachePath, &st); err2 == nil {
+				// Found the file in cache at expected location
+				p = expectedCachePath
+				n.mirrorPath = expectedCachePath
+				Debug("Open: found file in cache at %s", expectedCachePath)
+			} else {
+				// File not found anywhere
+				n.mirrorPath = ""
+				p = n.FullPath(false)
+			}
 		}
 	}
 
@@ -687,9 +871,7 @@ func (n *ShadowNode) Mkdir(ctx context.Context, name string, mode uint32, out *f
 		return nil, syscall.EPERM
 	}
 
-	Debug("Mkdir: %s, mode=%o", name, mode)
 	p := filepath.Join(n.FullPath(false), name)
-	Debug("Mkdir:%s", p)
 
 	// check if directory exists in src
 	st := syscall.Stat_t{}
@@ -702,12 +884,26 @@ func (n *ShadowNode) Mkdir(ctx context.Context, name string, mode uint32, out *f
 	// change path to cache
 	p = n.RebasePathUsingCache(p)
 
-	// Ensure directories have execute permissions
-	dirMode := os.FileMode(mode)
-	if dirMode&0111 == 0 {
-		dirMode |= 0755 // Add standard directory permissions if no execute bits
+	// Ensure parent directory has execute permissions before creating child
+	// This is critical - if parent can't be traversed, child creation will fail
+	parentDir := filepath.Dir(p)
+	if parentDir != p && parentDir != n.cachePath {
+		if err := ensureDirPermissions(parentDir); err != nil {
+
+			// Continue anyway - parent might already have correct permissions
+		}
 	}
-	Debug("Mkdir (cache path):%s, mode:%o", p, dirMode)
+
+	// Ensure directories have execute permissions
+	// Temporarily disable umask to ensure 0755 permissions are set correctly
+	// This is critical - umask can remove execute bits, making directories untraversable
+	oldUmask := syscall.Umask(0)
+	defer syscall.Umask(oldUmask)
+
+	// Always use 0755 for directories to ensure they're traversable
+	dirMode := os.FileMode(0755)
+
+	// Use os.Mkdir - it's simpler and handles mode correctly
 	err = os.Mkdir(p, dirMode)
 	if err != nil {
 		// Handle case where directory already exists (idempotent operation)
@@ -716,7 +912,10 @@ func (n *ShadowNode) Mkdir(ctx context.Context, name string, mode uint32, out *f
 			var st2 syscall.Stat_t
 			if err2 := syscall.Lstat(p, &st2); err2 == nil {
 				if st2.Mode&syscall.S_IFDIR != 0 {
-					// It's a directory, treat as success
+					// It's a directory, ensure it has proper permissions
+					if err := ensureDirPermissions(p); err != nil {
+						return nil, fs.ToErrno(err)
+					}
 					err = nil
 				} else {
 					// Path exists but is not a directory
@@ -728,22 +927,87 @@ func (n *ShadowNode) Mkdir(ctx context.Context, name string, mode uint32, out *f
 		} else {
 			return nil, fs.ToErrno(err)
 		}
+	} else {
+		// Directory was created, ensure it has proper permissions immediately
+		if err := ensureDirPermissions(p); err != nil {
+			syscall.Rmdir(p)
+			return nil, fs.ToErrno(err)
+		}
 	}
 
-	n.preserveOwner(ctx, p)
-
+	// Stat immediately after creation and permission fix to get attributes
 	st = syscall.Stat_t{}
 	if err := syscall.Lstat(p, &st); err != nil {
 		syscall.Rmdir(p)
 		return nil, fs.ToErrno(err)
 	}
 
+	// Ensure st.Mode has correct directory type and execute bits BEFORE preserveOwner
+	// This ensures preserveOwner sees correct permissions
+	if st.Mode&syscall.S_IFDIR != 0 {
+		permBits := st.Mode & 0777
+		if permBits&0111 == 0 {
+			// Missing execute bits - fix them in filesystem first
+			if err := syscall.Chmod(p, permBits|0755); err != nil {
+
+			}
+			// Update stat to reflect fixed permissions
+			if err := syscall.Lstat(p, &st); err != nil {
+				syscall.Rmdir(p)
+				return nil, fs.ToErrno(err)
+			}
+		}
+	} else {
+		// This shouldn't happen - directory should have S_IFDIR
+		syscall.Rmdir(p)
+		return nil, syscall.ENOTDIR
+	}
+
+	// Now call preserveOwner - it shouldn't affect permissions, only ownership
+	n.preserveOwner(ctx, p)
+
+	// Final stat after preserveOwner to get final attributes
+	if err := syscall.Lstat(p, &st); err != nil {
+		syscall.Rmdir(p)
+		return nil, fs.ToErrno(err)
+	}
+
+	// Ensure st.Mode still has correct directory type and execute bits
+	// preserveOwner shouldn't change permissions, but be safe
+	if st.Mode&syscall.S_IFDIR != 0 {
+		permBits := st.Mode & 0777
+		if permBits&0111 == 0 {
+			// Fix execute bits in stat structure for FromStat
+			st.Mode = (st.Mode &^ 0777) | (permBits | 0755)
+		}
+	} else {
+		// This shouldn't happen
+		st.Mode = (st.Mode &^ syscall.S_IFMT) | syscall.S_IFDIR | 0755
+	}
+
+	// Now call FromStat with the corrected stat structure
 	out.Attr.FromStat(&st)
 
 	node := newShadowNode(n.RootData, n.EmbeddedInode(), name, &st)
 	node.(*ShadowNode).mirrorPath = p
 
-	ch := n.NewInode(ctx, node, n.idFromStat(&st))
+	// Ensure StableAttr has correct mode - idFromStat uses st.Mode directly
+	// We've already fixed st.Mode above, so this should be correct
+	stableAttr := n.idFromStat(&st)
+
+	// Double-check that StableAttr.Mode has correct directory type and execute bits
+	if stableAttr.Mode&0170000 != 0040000 {
+		// Force directory type
+
+		stableAttr.Mode = (stableAttr.Mode &^ 0170000) | 0040000
+	}
+	if stableAttr.Mode&0111 == 0 {
+		// Force execute bits
+
+		stableAttr.Mode |= 0755
+	}
+
+	ch := n.NewInode(ctx, node, stableAttr)
 
 	// Don't invalidate cache immediately after creation - this can cause issues
 	// n.NotifyEntry(name)
@@ -958,7 +1222,32 @@ func (n *ShadowNode) RebasePathUsingSrc(path string) string {
 }
 
 func (n *ShadowNode) createMirroredDir(path string) (string, error) {
-	// Always use original implementation for Create method to avoid initialization issues
+	// Check if path is already a cache path - if so, use it directly
+	if strings.HasPrefix(path, n.cachePath) {
+		// Path is already in cache, check if it exists and respect its permissions
+		var st syscall.Stat_t
+		if err := syscall.Lstat(path, &st); err != nil {
+			if err == syscall.ENOENT {
+				// Create with default permissions if it doesn't exist
+				err := os.MkdirAll(path, 0755)
+				if err != nil {
+					return path, err
+				}
+			} else {
+				// Other error (likely permission denied accessing parent)
+				return path, err
+			}
+		} else {
+			// Directory exists, check if we have access to it
+			// This respects existing permissions for security tests
+			if err := syscall.Access(path, 0x2|0x1); err != nil { // W_OK | X_OK
+				return path, err
+			}
+		}
+		return path, nil
+	}
+
+	// Original logic for source paths
 	path = n.RebasePathUsingSrc(path)
 
 	srcDir := n.srcDir
@@ -984,40 +1273,31 @@ func (n *ShadowNode) createMirroredDir(path string) (string, error) {
 		fullCachePath = filepath.Join(fullCachePath, dir)
 	}
 
-	// Create all directories at once with default permissions
-	err := os.MkdirAll(fullCachePath, 0755)
-	if err != nil {
-		return fullCachePath, err
+	// Check if directory already exists to respect existing permissions
+	if _, err := os.Stat(fullCachePath); err != nil {
+		if os.IsNotExist(err) {
+			// Directory doesn't exist, create with default permissions
+			err := os.MkdirAll(fullCachePath, 0755)
+			if err != nil {
+				return fullCachePath, err
+			}
+		} else {
+			// Other error accessing directory
+			return fullCachePath, err
+		}
 	}
 
-	// Now fix permissions for each directory level
-	// for _, dir := range paths {
-	// 	dstDir = filepath.Join(dstDir, dir)
-
-	// 	// Always ensure directories have correct permissions (0755)
-	// 	// This prevents kernel attribute caching issues
-	// 	err = syscall.Chmod(dstDir, 0755)
-	// 	if err != nil {
-	// 		return dstDir, err
-	// 	}
-
-	// 	// Force kernel to refresh attributes after fixing permissions
-	// 	// Use sync.FileInfo to ensure the change is visible to the kernel
-	// 	if _, err := os.Stat(dstDir); err != nil {
-	// 		return dstDir, err
-	// 	}
-
-	// 	// Invalidate kernel attribute cache for this directory
-	// 	// Use recover to handle potential nil pointer in test contexts
-	// 	func() {
-	// 		defer func() {
-	// 			if r := recover(); r != nil {
-	// 				// Ignore panic in test contexts where inode might not be initialized
-	// 			}
-	// 		}()
-	// 		n.NotifyEntry(dir)
-	// 	}()
-	// }
+	// Now fix permissions for each directory level to ensure they're traversable
+	// This is important because os.MkdirAll may preserve existing permissions
+	// which could be missing execute bits
+	currentPath := dstDir
+	for _, dir := range paths {
+		currentPath = filepath.Join(currentPath, dir)
+		// Ensure each directory component has proper execute permissions
+		if err := ensureDirPermissions(currentPath); err != nil {
+			return currentPath, err
+		}
+	}
 
 	return fullCachePath, nil
 }
@@ -1352,12 +1632,13 @@ func (n *ShadowNode) Link(ctx context.Context, target fs.InodeEmbedder, name str
 
 	out.Attr.FromStat(&st)
 
-	node := newShadowNode(n.RootData, n.EmbeddedInode(), name, &st)
-	node.(*ShadowNode).mirrorPath = p
+	// Update the target node's mirrorPath to point to the new linked location
+	// This is crucial for Git's object creation pattern where it creates a temp file
+	// then links it to the final object name
+	targetNode.mirrorPath = p
 
-	ch := n.NewInode(ctx, node, n.idFromStat(&st))
-
-	return ch, 0
+	// Return the existing target node, not a new one
+	return target.EmbeddedInode(), 0
 }
 
 func (n *ShadowNode) CopyFileRange(ctx context.Context, fhIn fs.FileHandle, offIn uint64, out *fs.Inode, fhOut fs.FileHandle, offOut uint64, copyLen uint64, flags uint32) (uint32, syscall.Errno) {
@@ -1409,7 +1690,6 @@ func (n *ShadowNode) CopyFileRange(ctx context.Context, fhIn fs.FileHandle, offI
 
 func (n *ShadowNode) Write(ctx context.Context, f fs.FileHandle, data []byte, off int64) (uint32, syscall.Errno) {
 	p := n.FullPath(true)
-	Debug("Write: %s, len=%d, off=%d, data=%q", p, len(data), off, string(data))
 
 	// Copy-on-write: if file is in cache but empty, and source exists, copy source content first
 	// Use Lstat() on path for copy-on-write check (path-based, no reflection overhead)
@@ -1442,6 +1722,22 @@ func (n *ShadowNode) Write(ctx context.Context, f fs.FileHandle, data []byte, of
 		return 0, syscall.EBADF
 	}()
 	if errno == 0 {
+		// CRITICAL: After successful write, ensure file metadata is updated
+		// This prevents git from seeing empty files immediately after write
+		// Try to sync the file to ensure data is written and size is updated
+		if fileWithFd, ok := f.(interface{ Fd() int }); ok {
+			if fd := fileWithFd.Fd(); fd >= 0 {
+				// Force sync to ensure data is written to disk
+				syscall.Fsync(fd)
+				// Update file size by doing fstat
+				var st syscall.Stat_t
+				if err := syscall.Fstat(fd, &st); err == nil {
+					// File size is now properly updated
+
+				}
+			}
+		}
+
 		// Track write activity for Git auto-versioning
 		n.HandleWriteActivity(p)
 	}

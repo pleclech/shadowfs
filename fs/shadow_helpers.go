@@ -72,11 +72,20 @@ func (h *ShadowNodeHelpers) CreateMirroredDir(path string) (string, syscall.Errn
 		if err := os.MkdirAll(parentDir, 0755); err != nil {
 			return "", fs.ToErrno(err)
 		}
+		// Ensure parent directories have proper permissions
+		if err := ensureDirPermissions(parentDir); err != nil {
+			return "", fs.ToErrno(err)
+		}
 	}
 
 	// Create the target directory
 	err := syscall.Mkdir(cachePath, 0755)
 	if err != nil && err != syscall.EEXIST {
+		return "", fs.ToErrno(err)
+	}
+
+	// Ensure directory has proper permissions (especially if it already existed)
+	if err := ensureDirPermissions(cachePath); err != nil {
 		return "", fs.ToErrno(err)
 	}
 
@@ -98,11 +107,22 @@ func (h *ShadowNodeHelpers) CreateMirroredFileOrDir(srcPath string) (string, sys
 	if err := os.MkdirAll(parentDir, 0755); err != nil {
 		return "", fs.ToErrno(err)
 	}
+	// Ensure parent directories have proper permissions
+	if err := ensureDirPermissions(parentDir); err != nil {
+		return "", fs.ToErrno(err)
+	}
 
 	// Create file or directory based on type
 	if st.Mode&syscall.S_IFDIR != 0 {
-		err := syscall.Mkdir(cachePath, st.Mode) // Use full mode including S_IFDIR
+		// Ensure directories have at least 0755 permissions (they need execute bits to be traversable)
+		// Preserve higher permissions if they exist
+		dirMode := st.Mode | 0755
+		err := syscall.Mkdir(cachePath, dirMode)
 		if err != nil && err != syscall.EEXIST {
+			return "", fs.ToErrno(err)
+		}
+		// Ensure directory has proper permissions (especially if it already existed)
+		if err := ensureDirPermissions(cachePath); err != nil {
 			return "", fs.ToErrno(err)
 		}
 	} else {

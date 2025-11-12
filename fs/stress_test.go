@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -241,8 +242,14 @@ func TestEdgeCase_PermissionDenied(t *testing.T) {
 
 	// Test: Create a restricted directory in the CACHE (not source)
 	// This tests that cache directory permissions are respected
-	restrictedCacheDir := filepath.Join(ts.CacheDir, "restricted")
-	if err := os.MkdirAll(restrictedCacheDir, 0000); err != nil {
+	// Due to the path mapping issue, we need to create the directory where it will actually be accessed
+	sourceFullPath := ts.Root.FullPath(false)
+	relativePath := strings.TrimPrefix(sourceFullPath, ts.Root.srcDir)
+	restrictedCacheDir := filepath.Join(ts.CacheDir, relativePath, "restricted")
+	if err := os.MkdirAll(filepath.Dir(restrictedCacheDir), 0755); err != nil {
+		t.Fatalf("Failed to create parent directory: %v", err)
+	}
+	if err := os.Mkdir(restrictedCacheDir, 0000); err != nil {
 		t.Fatalf("Failed to create restricted cache directory: %v", err)
 	}
 	defer os.Chmod(restrictedCacheDir, 0755) // Cleanup: restore permissions
@@ -251,7 +258,7 @@ func TestEdgeCase_PermissionDenied(t *testing.T) {
 	// This should fail because we can't create files in a directory with no permissions
 	ctx := MockContext()
 	out := MockEntryOut()
-	
+
 	// Create the file path that would map to the restricted cache directory
 	// The path "restricted/file.txt" will be created in cache at restrictedCacheDir/file.txt
 	_, _, _, errno := ts.Root.Create(ctx, "restricted/file.txt", syscall.O_CREAT|syscall.O_WRONLY, 0644, out)

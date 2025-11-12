@@ -93,6 +93,11 @@ func main() {
 		cacheDirPath = os.Getenv("SHADOWFS_CACHE_DIR")
 	}
 
+	// Initialize logger with debug level if debug flag is set
+	if *debug {
+		shadowfs.InitLogger(shadowfs.LogLevelDebug)
+	}
+
 	rootNode, err := shadowfs.NewShadowRoot(flag.Arg(0), flag.Arg(1), cacheDirPath)
 	if err != nil {
 		log.Fatalf("NewShadowRoot error:\n%v", err)
@@ -140,6 +145,13 @@ func main() {
 		sig := <-c
 		log.Printf("Received %v signal, cleaning up...", sig)
 
+		go func() {
+			// Handle second signal for forceful shutdown
+			sig := <-c
+			log.Printf("Received second %v signal, forcing exit...", sig)
+			os.Exit(1)
+		}()
+
 		// Cleanup Git resources and commit all pending changes
 		// CleanupGitManager calls CommitAllPending() which commits all uncommitted changes
 		root.CleanupGitManager()
@@ -162,25 +174,7 @@ func main() {
 		shutdownComplete <- true
 	}()
 
-	// Wait for either server to stop or shutdown to complete with timeout
-	select {
-	case <-time.After(30 * time.Second):
-		log.Printf("Server wait timeout, forcing exit...")
-		os.Exit(1)
-	case <-shutdownComplete:
-		// Give server a moment to stop gracefully
-		time.Sleep(100 * time.Millisecond)
-		log.Printf("Graceful shutdown completed")
-	}
-
-	// Handle second signal for forceful shutdown
-	go func() {
-		sig := <-c
-		log.Printf("Received second %v signal, forcing exit...", sig)
-		os.Exit(1)
-	}()
-
-	// This should return quickly after unmount, but we have timeout as safety
+	// Wait for server to stop (should run indefinitely until interrupted)
 	server.Wait()
 	log.Printf("Server stopped, exiting...")
 }
