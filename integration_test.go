@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	shadowfs "github.com/pleclech/shadowfs/fs"
 )
 
 const (
@@ -645,7 +647,8 @@ func TestFilesystem_GitAutoCommitPathConversion(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	// Verify git repository was created
-	gitDir := filepath.Join(mountPoint, ".gitofs")
+	// git init creates .gitofs/.git/, so check for .gitofs/.git
+	gitDir := filepath.Join(mountPoint, shadowfs.GitofsName, ".git")
 	if stat, err := os.Stat(gitDir); err != nil || !stat.IsDir() {
 		t.Fatalf("Git repository not created: %v", err)
 	}

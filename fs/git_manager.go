@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/pleclech/shadowfs/fs/cache"
 )
 
 // CommitRequest represents a request to commit files
@@ -45,7 +47,7 @@ type GitConfig struct {
 func NewGitManager(workspacePath, sourcePath string, config GitConfig) *GitManager {
 	// gitDir points to the actual .git directory (created by git init)
 	// git init .gitofs creates .gitofs/.git/, so gitDir should be .gitofs/.git
-	gitDir := filepath.Join(workspacePath, ".gitofs", ".git")
+	gitDir := cache.GetGitDirPath(workspacePath)
 	gm := &GitManager{
 		workspacePath: workspacePath,
 		sourcePath:    sourcePath,
@@ -158,7 +160,7 @@ func (gm *GitManager) createWorkspaceGit() error {
 	// Initialize Git repository with empty template to avoid issues
 	// Use absolute path to avoid FUSE filesystem issues
 	// git init creates .git/ inside the specified directory, so we pass .gitofs (without .git)
-	gitInitPath := filepath.Join(gm.workspacePath, ".gitofs")
+	gitInitPath := filepath.Join(gm.workspacePath, GitofsName)
 	cmd := exec.Command("git", "init", gitInitPath, "--template=")
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("git init failed: %w", err)

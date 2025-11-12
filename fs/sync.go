@@ -1,7 +1,6 @@
 package fs
 
 import (
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pleclech/shadowfs/fs/cache"
 	"github.com/pleclech/shadowfs/fs/xattr"
 )
 
@@ -176,8 +176,8 @@ func SyncCacheToSource(options SyncOptions) (*SyncResult, error) {
 
 // CreateBackup creates a timestamped backup of the source directory
 func CreateBackup(sourcePath, mountPoint string) (string, string, error) {
-	// Compute mount ID
-	mountID := fmt.Sprintf("%x", sha256.Sum256([]byte(mountPoint+sourcePath)))
+	// Compute mount ID using centralized function
+	mountID := cache.ComputeMountID(mountPoint, sourcePath)
 	
 	// Create backup directory name
 	timestamp := time.Now().Format("20060102-150405")
@@ -186,11 +186,12 @@ func CreateBackup(sourcePath, mountPoint string) (string, string, error) {
 	// Determine backup base directory
 	backupBaseDir := os.Getenv("SHADOWFS_BACKUP_DIR")
 	if backupBaseDir == "" {
-		if homeDir, err := os.UserHomeDir(); err == nil {
-			backupBaseDir = filepath.Join(homeDir, ".shadowfs", "backups")
-		} else {
+		// Use centralized function to get cache base directory, then add backups subdirectory
+		cacheBaseDir, err := cache.GetCacheBaseDir()
+		if err != nil {
 			return "", "", fmt.Errorf("cannot determine backup directory: %w", err)
 		}
+		backupBaseDir = filepath.Join(cacheBaseDir, "backups")
 	}
 	
 	backupDir := filepath.Join(backupBaseDir, backupID)
@@ -232,11 +233,12 @@ func RollbackSync(backupID, sourcePath string) error {
 	// Find backup directory
 	backupBaseDir := os.Getenv("SHADOWFS_BACKUP_DIR")
 	if backupBaseDir == "" {
-		if homeDir, err := os.UserHomeDir(); err == nil {
-			backupBaseDir = filepath.Join(homeDir, ".shadowfs", "backups")
-		} else {
+		// Use centralized function to get cache base directory, then add backups subdirectory
+		cacheBaseDir, err := cache.GetCacheBaseDir()
+		if err != nil {
 			return fmt.Errorf("cannot determine backup directory: %w", err)
 		}
+		backupBaseDir = filepath.Join(cacheBaseDir, "backups")
 	}
 	
 	backupDir := filepath.Join(backupBaseDir, backupID)
@@ -519,8 +521,9 @@ func detectConflict(cacheFile, sourceFile string) (bool, error) {
 func updateBackupInfo(backupID string, transactionLog []string) {
 	backupBaseDir := os.Getenv("SHADOWFS_BACKUP_DIR")
 	if backupBaseDir == "" {
-		if homeDir, err := os.UserHomeDir(); err == nil {
-			backupBaseDir = filepath.Join(homeDir, ".shadowfs", "backups")
+		// Use centralized function to get cache base directory, then add backups subdirectory
+		if cacheBaseDir, err := cache.GetCacheBaseDir(); err == nil {
+			backupBaseDir = filepath.Join(cacheBaseDir, "backups")
 		} else {
 			return // Can't update backup info
 		}
@@ -588,11 +591,12 @@ func copyFileWithMetadata(src, dst string, mode os.FileMode) error {
 func getBackupBaseDir() (string, error) {
 	backupBaseDir := os.Getenv("SHADOWFS_BACKUP_DIR")
 	if backupBaseDir == "" {
-		if homeDir, err := os.UserHomeDir(); err == nil {
-			backupBaseDir = filepath.Join(homeDir, ".shadowfs", "backups")
-		} else {
+		// Use centralized function to get cache base directory, then add backups subdirectory
+		cacheBaseDir, err := cache.GetCacheBaseDir()
+		if err != nil {
 			return "", fmt.Errorf("cannot determine backup directory: %w", err)
 		}
+		backupBaseDir = filepath.Join(cacheBaseDir, "backups")
 	}
 	return backupBaseDir, nil
 }

@@ -2,7 +2,6 @@ package fs
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1260,8 +1259,8 @@ func NewShadowRoot(inMountPoint, inSrcDir, cacheBaseDir string) (fs.InodeEmbedde
 		return nil, fmt.Errorf("get source directory error:\n%w", err)
 	}
 
-	// get mountID as sha256 of mountPoint
-	mountID := fmt.Sprintf("%x", sha256.Sum256([]byte(mountPoint+srcDir)))
+	// Compute mount ID using centralized function
+	mountID := cache.ComputeMountID(mountPoint, srcDir)
 
 	var baseCacheDir string
 	if cacheBaseDir != "" {
@@ -1274,27 +1273,26 @@ func NewShadowRoot(inMountPoint, inSrcDir, cacheBaseDir string) (fs.InodeEmbedde
 			return nil, fmt.Errorf("cache directory validation failed: %w", err)
 		}
 	} else {
-		// Default: use ~/.shadowfs
-		homeDir, err := os.UserHomeDir()
+		// Use centralized function to get cache base directory
+		baseCacheDir, err = cache.GetCacheBaseDir()
 		if err != nil {
-			return nil, fmt.Errorf("get home directory error:\n%w", err)
+			return nil, fmt.Errorf("get cache base directory error:\n%w", err)
 		}
-		baseCacheDir = filepath.Join(homeDir, HomeName)
 	}
 
-	// create session directory if !exists
-	sessionPath := filepath.Join(baseCacheDir, mountID)
+	// Create session directory using centralized function
+	sessionPath := cache.GetSessionPath(baseCacheDir, mountID)
 	if err := rootinit.CreateDir(sessionPath, 0755); err != nil {
 		return nil, fmt.Errorf("creating session directory error:\n%w", err)
 	}
 
-	cachePath := filepath.Join(sessionPath, RootName)
+	cachePath := cache.GetCachePath(sessionPath)
 	if err := rootinit.CreateDir(cachePath, 0755); err != nil {
 		return nil, fmt.Errorf("creating cache directory error:\n%w", err)
 	}
 
 	// create a file into the session directory indicating the target dir
-	targetFile := filepath.Join(sessionPath, ".target")
+	targetFile := cache.GetTargetFilePath(sessionPath)
 	if err := rootinit.WriteFileOnce(targetFile, []byte(srcDir), 0444); err != nil {
 		return nil, fmt.Errorf("creating target file error:\n%w", err)
 	}

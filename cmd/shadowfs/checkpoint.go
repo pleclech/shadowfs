@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	shadowfs "github.com/pleclech/shadowfs/fs"
+	"github.com/pleclech/shadowfs/fs/cache"
 )
 
 func runCheckpointCommand(args []string) {
@@ -37,8 +38,8 @@ func runCheckpointCommand(args []string) {
 		log.Fatal("Git auto-versioning is not enabled for this mount point")
 	}
 
-	// Get cache path
-	cachePath := filepath.Join(cacheDir, ".root")
+	// Get cache path using centralized function
+	cachePath := cache.GetCachePath(cacheDir)
 
 	if *filePath != "" {
 		// Validate file path if specified

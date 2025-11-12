@@ -1,11 +1,12 @@
 package fs
 
 import (
-	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/pleclech/shadowfs/fs/cache"
 )
 
 // FindCacheDirectory finds the cache directory for a given mount point
@@ -22,25 +23,27 @@ func FindCacheDirectory(mountPoint string) (string, error) {
 		return "", fmt.Errorf("cannot find source directory: %w", err)
 	}
 
-	// 3. Compute mountID (same logic as NewShadowRoot)
-	mountID := fmt.Sprintf("%x", sha256.Sum256([]byte(absMountPoint+srcDir)))
+	// 3. Compute mountID using centralized function
+	mountID := cache.ComputeMountID(absMountPoint, srcDir)
 
 	// 4. Search cache directories
-	cacheBaseDirs := []string{
-		os.Getenv("SHADOWFS_CACHE_DIR"),
+	// Try environment variable first
+	cacheBaseDirs := []string{}
+	if envDir := os.Getenv("SHADOWFS_CACHE_DIR"); envDir != "" {
+		cacheBaseDirs = append(cacheBaseDirs, envDir)
 	}
 	
-	// Add default cache directory
-	if homeDir, err := os.UserHomeDir(); err == nil {
-		cacheBaseDirs = append(cacheBaseDirs, filepath.Join(homeDir, ".shadowfs"))
+	// Add default cache directory using centralized function
+	if defaultDir, err := cache.GetCacheBaseDir(); err == nil {
+		cacheBaseDirs = append(cacheBaseDirs, defaultDir)
 	}
 
 	for _, baseDir := range cacheBaseDirs {
 		if baseDir == "" {
 			continue
 		}
-		sessionPath := filepath.Join(baseDir, mountID)
-		gitDir := filepath.Join(sessionPath, ".gitofs")
+		sessionPath := cache.GetSessionPath(baseDir, mountID)
+		gitDir := filepath.Join(sessionPath, GitofsName)
 		if _, err := os.Stat(gitDir); err == nil {
 			return sessionPath, nil
 		}
@@ -76,12 +79,12 @@ func findSourceDirectory(mountPoint string) (string, error) {
 			if !entry.IsDir() {
 				continue
 			}
-			sessionPath := filepath.Join(baseDir, entry.Name())
-			targetFile := filepath.Join(sessionPath, ".target")
+			sessionPath := cache.GetSessionPath(baseDir, entry.Name())
+			targetFile := filepath.Join(sessionPath, TargetFileName)
 			if data, err := os.ReadFile(targetFile); err == nil {
 				srcDir := strings.TrimSpace(string(data))
-				// Verify this session matches the mount point
-				mountID := fmt.Sprintf("%x", sha256.Sum256([]byte(mountPoint+srcDir)))
+				// Verify this session matches the mount point using centralized function
+				mountID := cache.ComputeMountID(mountPoint, srcDir)
 				if entry.Name() == mountID {
 					return srcDir, nil
 				}
@@ -104,13 +107,13 @@ func findSourceFromProcMounts(mountPoint string) (string, error) {
 // GetGitRepository creates a GitManager for an existing cache directory
 func GetGitRepository(cacheDir string) (*GitManager, error) {
 	// git init creates .gitofs/.git/, so check for .gitofs/.git
-	gitDir := filepath.Join(cacheDir, ".gitofs", ".git")
+	gitDir := cache.GetGitDirPath(cacheDir)
 	if _, err := os.Stat(gitDir); err != nil {
 		return nil, fmt.Errorf("git repository not found in cache directory: %w", err)
 	}
 
 	// Read source directory from .target file
-	targetFile := filepath.Join(cacheDir, ".target")
+	targetFile := cache.GetTargetFilePath(cacheDir)
 	srcDirData, err := os.ReadFile(targetFile)
 	if err != nil {
 		return nil, fmt.Errorf("cannot read source directory from .target file: %w", err)
@@ -130,7 +133,7 @@ func GetGitRepository(cacheDir string) (*GitManager, error) {
 // ValidateGitRepository checks if a Git repository exists and is valid
 func ValidateGitRepository(cacheDir string) error {
 	// git init creates .gitofs/.git/, so check for .gitofs/.git
-	gitDir := filepath.Join(cacheDir, ".gitofs", ".git")
+	gitDir := cache.GetGitDirPath(cacheDir)
 	if _, err := os.Stat(gitDir); err != nil {
 		return fmt.Errorf("git repository not found: %w", err)
 	}

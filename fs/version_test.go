@@ -1,12 +1,12 @@
 package fs
 
 import (
-	"crypto/sha256"
-	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/pleclech/shadowfs/fs/cache"
 )
 
 func TestFindCacheDirectory(t *testing.T) {
@@ -29,8 +29,8 @@ func TestFindCacheDirectory(t *testing.T) {
 		t.Fatalf("Failed to create source dir: %v", err)
 	}
 
-	// Compute mount ID
-	mountID := fmt.Sprintf("%x", sha256.Sum256([]byte(mountPoint+sourceDir)))
+	// Compute mount ID using centralized function
+	mountID := cache.ComputeMountID(mountPoint, sourceDir)
 	sessionPath := filepath.Join(cacheBaseDir, mountID)
 	if err := os.MkdirAll(sessionPath, 0755); err != nil {
 		t.Fatalf("Failed to create session path: %v", err)

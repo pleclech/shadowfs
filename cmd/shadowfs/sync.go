@@ -10,6 +10,7 @@ import (
 	"time"
 
 	shadowfs "github.com/pleclech/shadowfs/fs"
+	"github.com/pleclech/shadowfs/fs/cache"
 )
 
 func runSyncCommand(args []string) {
@@ -46,7 +47,7 @@ func runSyncCommand(args []string) {
 		log.Fatalf("Failed to read source directory: %v", err)
 	}
 	sourcePath := strings.TrimSpace(string(srcDirData))
-	cachePath := filepath.Join(cacheDir, ".root")
+	cachePath := cache.GetCachePath(cacheDir)
 
 	if *rollback {
 		// Rollback operation

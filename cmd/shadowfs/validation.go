@@ -8,32 +8,18 @@ import (
 	"strings"
 
 	shadowfs "github.com/pleclech/shadowfs/fs"
+	"github.com/pleclech/shadowfs/fs/rootinit"
 )
 
 // validateMountPoint checks if mount point exists and is a directory
+// Uses rootinit.GetMountPoint for consistency with internal code
 func validateMountPoint(mountPoint string) error {
 	if mountPoint == "" {
 		return fmt.Errorf("mount point is required")
 	}
 
-	absPath, err := filepath.Abs(mountPoint)
-	if err != nil {
-		return fmt.Errorf("invalid mount point path: %w", err)
-	}
-
-	info, err := os.Stat(absPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("mount point does not exist: %s", absPath)
-		}
-		return fmt.Errorf("cannot access mount point: %w", err)
-	}
-
-	if !info.IsDir() {
-		return fmt.Errorf("mount point is not a directory: %s", absPath)
-	}
-
-	return nil
+	_, err := rootinit.GetMountPoint(mountPoint)
+	return err
 }
 
 // validateCommitHash checks if a commit hash exists in the Git repository
