@@ -41,8 +41,6 @@ func FindSourceFromMounts(mountPoint string) (string, error) {
 		mountPointPath := fields[1]
 		filesystem := fields[2]
 
-		fmt.Printf("Debug: in FindSourceFromMounts, device: %s, mountPointPath: %s, filesystem: %s\n", device, mountPointPath, filesystem)
-
 		// Normalize mount point path for comparison
 		mountPointPath = filepath.Clean(mountPointPath)
 
@@ -75,4 +73,48 @@ func FindSourceFromMounts(mountPoint string) (string, error) {
 	}
 
 	return "", fmt.Errorf("mount point not found in /proc/mounts: %s", mountPoint)
+}
+
+// IsMountPointActive checks if a mount point is currently mounted by checking /proc/mounts
+func IsMountPointActive(mountPoint string) (bool, error) {
+	// Normalize mount point for comparison
+	normalizedMountPoint, err := filepath.Abs(mountPoint)
+	if err != nil {
+		return false, fmt.Errorf("failed to normalize mount point: %w", err)
+	}
+	normalizedMountPoint = filepath.Clean(normalizedMountPoint)
+
+	// Open /proc/mounts
+	file, err := os.Open("/proc/mounts")
+	if err != nil {
+		return false, fmt.Errorf("failed to open /proc/mounts: %w", err)
+	}
+	defer file.Close()
+
+	// Parse /proc/mounts format: device mount_point filesystem options dump pass
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+
+		mountPointPath := fields[1]
+		filesystem := fields[2]
+
+		// Normalize mount point path for comparison
+		mountPointPath = filepath.Clean(mountPointPath)
+
+		// Check if this mount point matches and is a FUSE filesystem (shadowfs uses FUSE)
+		if mountPointPath == normalizedMountPoint && strings.HasPrefix(filesystem, "fuse") {
+			return true, nil
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return false, fmt.Errorf("error reading /proc/mounts: %w", err)
+	}
+
+	return false, nil
 }

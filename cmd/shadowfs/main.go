@@ -14,6 +14,7 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	shadowfs "github.com/pleclech/shadowfs/fs"
+	"github.com/pleclech/shadowfs/fs/rootinit"
 )
 
 func unmount(mountPoint string) error {
@@ -68,6 +69,12 @@ func main() {
 		case "stop":
 			runStopCommand(os.Args[2:])
 			return
+		case "list":
+			runListCommand(os.Args[2:])
+			return
+		case "info":
+			runInfoCommand(os.Args[2:])
+			return
 		case "help":
 			if len(os.Args) > 2 {
 				printSubcommandHelp(os.Args[2], binaryName)
@@ -91,6 +98,22 @@ func main() {
 		log.Fatalf("Usage:\n %s MOUNTPOINT SRCDIR", binaryName)
 	}
 
+	// Daemonize if requested (must be done before mounting)
+	if *daemon {
+		mountPoint := flag.Arg(0)
+		sourceDir := flag.Arg(1)
+		
+		// Check if mount point is already in use
+		if err := checkMountPointAvailable(mountPoint); err != nil {
+			log.Fatalf("Cannot start daemon: %v", err)
+		}
+		
+		if err := daemonize(mountPoint, sourceDir); err != nil {
+			log.Fatalf("Failed to daemonize: %v", err)
+		}
+		// Parent process exits here, child continues
+	}
+
 	// Resolve cache directory: flag > environment variable > default
 	cacheDirPath := *cacheDir
 	if cacheDirPath == "" {
@@ -102,7 +125,17 @@ func main() {
 		shadowfs.InitLogger(shadowfs.LogLevelDebug)
 	}
 
-	rootNode, err := shadowfs.NewShadowRoot(flag.Arg(0), flag.Arg(1), cacheDirPath)
+	mountPoint := flag.Arg(0)
+	
+	// Check if mount point is already mounted (for non-daemon mode)
+	if !*daemon {
+		isMounted, err := rootinit.IsMountPointActive(mountPoint)
+		if err == nil && isMounted {
+			log.Fatalf("Mount point %s is already mounted", mountPoint)
+		}
+	}
+	
+	rootNode, err := shadowfs.NewShadowRoot(mountPoint, flag.Arg(1), cacheDirPath)
 	if err != nil {
 		log.Fatalf("NewShadowRoot error:\n%v", err)
 	}
@@ -140,8 +173,9 @@ func main() {
 		}
 	}
 
-	// Write PID file if running as daemon
-	if *daemon {
+	// Write PID file if running as daemon (check env var set by daemonize)
+	isDaemonChild := os.Getenv("SHADOWFS_DAEMON") == "1"
+	if *daemon || isDaemonChild {
 		mountID := root.GetMountID()
 		sourceDir := flag.Arg(1)
 		if err := writePIDFile(mountID, root.GetMountPoint(), sourceDir); err != nil {
@@ -173,8 +207,9 @@ func main() {
 
 		log.Printf("Git cleanup completed, unmounting filesystem...")
 
-		// Remove PID file if running as daemon
-		if *daemon {
+		// Remove PID file if we're in daemon process
+		isDaemonChild := os.Getenv("SHADOWFS_DAEMON") == "1"
+		if isDaemonChild {
 			mountID := root.GetMountID()
 			if err := removePIDFile(mountID); err != nil {
 				log.Printf("Warning: Failed to remove PID file: %v", err)
@@ -214,6 +249,9 @@ Commands:
   checkpoint  Create a manual checkpoint of current changes
   sync        Sync cache to source directory with backup/rollback
   backups     Manage backups (list, info, delete, cleanup)
+  list        List all active mounts
+  info        Show detailed statistics for a mount point
+  stop        Stop a running daemon process
   help        Show help for a command
 
 Flags for mount:
@@ -227,6 +265,8 @@ Flags for mount:
 Examples:
   %s /mnt/shadow /home/user/source
   %s -daemon /mnt/shadow /home/user/source
+  %s list
+  %s info --mount-point /mnt/shadow
   %s stop --mount-point /mnt/shadow
   %s version list --mount-point /mnt/shadow
   %s checkpoint --mount-point /mnt/shadow
@@ -234,7 +274,7 @@ Examples:
   %s backups list
 
 Use "%s help <command>" for command-specific help.
-`, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName)
+`, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName)
 }
 
 func printSubcommandHelp(command string, binaryName string) {
@@ -297,6 +337,48 @@ Commands:
   cleanup   Cleanup old backups
 
 Use "` + binaryName + ` backups <command> --help" for command-specific help.
+`)
+	case "list":
+		fmt.Print(`Usage: ` + binaryName + ` list
+
+Lists all active mounts (both foreground and daemon processes).
+
+The output shows:
+  - Mount Point: The mount point path
+  - Source Directory: The source directory being shadowed
+  - Status: active (foreground), daemon (background), or stale (process not running)
+  - PID: Process ID (for daemon processes)
+  - Started: When the mount was started
+
+Examples:
+  ` + binaryName + ` list
+`)
+	case "info":
+		fmt.Print(`Usage: ` + binaryName + ` info [options]
+
+Shows detailed statistics for a specific mount point.
+
+Options:
+  -mount-point string   Mount point path (required)
+
+The output includes:
+  - Mount information (mount point, source directory, cache directory, status)
+  - Cache statistics (size, file count, directory count)
+  - Git status (if enabled): last commit info, uncommitted changes
+
+Examples:
+  ` + binaryName + ` info --mount-point /mnt/shadow
+`)
+	case "stop":
+		fmt.Print(`Usage: ` + binaryName + ` stop [options]
+
+Stops a running daemon process for a mount point.
+
+Options:
+  -mount-point string   Mount point path (required)
+
+Examples:
+  ` + binaryName + ` stop --mount-point /mnt/shadow
 `)
 	default:
 		fmt.Printf("Unknown command: %s\n\n", command)

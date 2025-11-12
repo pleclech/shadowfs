@@ -3,13 +3,10 @@
 
 package rootinit
 
-import (
-	"fmt"
-)
+import "fmt"
 
-// FindSourceFromMounts attempts to find source directory from system mount information
-// On non-Linux platforms, this returns an error indicating platform-specific implementation is needed
-func FindSourceFromMounts(mountPoint string) (string, error) {
-	return "", fmt.Errorf("cannot determine source directory automatically on this platform, please specify --source-dir")
+// IsMountPointActive checks if a mount point is currently mounted
+// This is a stub implementation for non-Linux platforms
+func IsMountPointActive(mountPoint string) (bool, error) {
+	return false, fmt.Errorf("mount detection not implemented on this platform")
 }
-

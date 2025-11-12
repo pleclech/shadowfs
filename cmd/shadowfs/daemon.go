@@ -151,8 +151,43 @@ func stopDaemon(mountPoint string) error {
 	return nil
 }
 
+// checkMountPointAvailable checks if a mount point is already mounted or has an active daemon
+func checkMountPointAvailable(mountPoint string) error {
+	// Normalize mount point
+	normalizedMountPoint, err := rootinit.GetMountPoint(mountPoint)
+	if err != nil {
+		return fmt.Errorf("invalid mount point: %w", err)
+	}
+
+	// Check if mount point is already mounted
+	isMounted, err := rootinit.IsMountPointActive(normalizedMountPoint)
+	if err != nil {
+		return fmt.Errorf("failed to check mount status: %w", err)
+	}
+	if isMounted {
+		return fmt.Errorf("mount point %s is already mounted", normalizedMountPoint)
+	}
+
+	// Check if there's already a daemon running for this mount point
+	_, daemonInfo, err := findPIDFileByMountPoint(normalizedMountPoint)
+	if err == nil {
+		// Found a PID file, check if process is still running
+		process, err := os.FindProcess(daemonInfo.PID)
+		if err == nil {
+			// Signal 0 doesn't actually send a signal, just checks if process exists
+			if err := process.Signal(syscall.Signal(0)); err == nil {
+				return fmt.Errorf("daemon is already running for mount point %s (PID: %d)", normalizedMountPoint, daemonInfo.PID)
+			}
+		}
+		// Process not running but PID file exists - this is a stale PID file
+		// We'll allow mounting in this case, but could clean it up
+	}
+
+	return nil
+}
+
 // daemonize forks the process and runs in background
-func daemonize() error {
+func daemonize(mountPoint, sourceDir string) error {
 	// Get the current executable path
 	execPath, err := os.Executable()
 	if err != nil {
@@ -177,9 +212,29 @@ func daemonize() error {
 		Setsid: true, // Create new session
 	}
 
+	// Set environment variable to mark this as daemon child process
+	cmd.Env = append(os.Environ(), "SHADOWFS_DAEMON=1")
+
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start daemon process: %w", err)
 	}
+
+	// Compute mount ID to show actual PID file path
+	mountID := cache.ComputeMountID(mountPoint, sourceDir)
+	pidFilePath, err := cache.GetDaemonPIDFilePath(mountID)
+	if err != nil {
+		// Fallback if we can't get the path
+		pidFilePath = "~/.shadowfs/daemons/<mount-id>.pid"
+	}
+
+	// Print success message before exiting parent process
+	fmt.Printf("Daemon started successfully\n")
+	fmt.Printf("  PID: %d\n", cmd.Process.Pid)
+	fmt.Printf("  Mount Point: %s\n", mountPoint)
+	fmt.Printf("  Source Directory: %s\n", sourceDir)
+	fmt.Printf("  PID File: %s\n", pidFilePath)
+	fmt.Printf("\nUse 'shadowfs list' to see all active mounts\n")
+	fmt.Printf("Use 'shadowfs stop --mount-point %s' to stop the daemon\n", mountPoint)
 
 	// Exit parent process immediately
 	os.Exit(0)
