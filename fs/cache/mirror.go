@@ -44,7 +44,12 @@ func CreateMirroredDir(path, cachePath, srcDir string) (string, error) {
 				return path, err
 			}
 		} else {
-			// Directory exists, check if we have access to it
+			// Directory exists - verify it's actually a directory
+			if st.Mode&syscall.S_IFDIR == 0 {
+				// Path exists but is not a directory
+				return path, syscall.ENOTDIR
+			}
+			// Check if we have access to it
 			// This respects existing permissions for security tests
 			if err := syscall.Access(path, 0x2|0x1); err != nil { // W_OK | X_OK
 				return path, err
@@ -222,4 +227,3 @@ func CopyFileSimple(srcPath, destPath string, mode uint32) syscall.Errno {
 
 	return 0
 }
-

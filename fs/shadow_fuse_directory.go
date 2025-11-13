@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -47,22 +48,28 @@ func (n *ShadowNode) Mkdir(ctx context.Context, name string, mode uint32, out *f
 	// change path to cache
 	p = n.RebasePathUsingCache(p)
 
-	// Check if path exists and is marked as deleted (from a previous file deletion)
-	// If so, remove the deleted file and xattr to allow directory creation
-	var existingSt syscall.Stat_t
-	if err := syscall.Lstat(p, &existingSt); err == nil {
-		// Path exists - check if it's marked as deleted
-		attr := xattr.XAttr{}
-		exists, errno := xattr.Get(p, &attr)
-		if errno == 0 && exists && xattr.IsPathDeleted(attr) {
-			// Path exists and is marked as deleted - remove it to allow directory creation
-			// Remove the xattr first
-			xattr.Remove(p)
-			// Remove the file
+	// Check if path is marked as deleted (from a previous file deletion)
+	// Xattr can persist even after file is unlinked, so check xattr regardless of file existence
+	// If marked as deleted, remove the xattr and any existing file to allow directory creation
+	attr := xattr.XAttr{}
+	exists, errno := xattr.Get(p, &attr)
+	typeReplacement := false
+	if errno == 0 && exists && xattr.IsPathDeleted(attr) {
+		// This is type replacement: file was deleted, now creating directory
+		typeReplacement = true
+
+		// Path is marked as deleted - remove the xattr and any existing file
+		// Try to remove the file if it exists (might have been unlinked already)
+		var existingSt syscall.Stat_t
+		if err := syscall.Lstat(p, &existingSt); err == nil {
+			// File exists - unlink it first (this also removes the xattr)
 			if err := syscall.Unlink(p); err != nil {
-				// If unlink fails, continue anyway - might be a directory already
-				// The subsequent Mkdir will handle it
+				// If unlink fails, try to remove xattr anyway
+				xattr.Remove(p)
 			}
+		} else {
+			// File doesn't exist, but xattr might still be there - remove it
+			xattr.Remove(p)
 		}
 	}
 
@@ -175,6 +182,13 @@ func (n *ShadowNode) Mkdir(ctx context.Context, name string, mode uint32, out *f
 	// Now call FromStat with the corrected stat structure
 	out.Attr.FromStat(&st)
 
+	// For type replacement, set short timeouts to force quick revalidation
+	// But not too short to avoid excessive kernel requests
+	if typeReplacement {
+		out.SetEntryTimeout(100 * time.Millisecond) // 100ms timeout for directory entry
+		out.SetAttrTimeout(100 * time.Millisecond)  // 100ms timeout for attributes
+	}
+
 	node := newShadowNode(n.RootData, n.EmbeddedInode(), name, &st)
 	node.(*ShadowNode).mirrorPath = p
 
@@ -185,19 +199,52 @@ func (n *ShadowNode) Mkdir(ctx context.Context, name string, mode uint32, out *f
 	// Double-check that StableAttr.Mode has correct directory type and execute bits
 	if stableAttr.Mode&0170000 != 0040000 {
 		// Force directory type
-
 		stableAttr.Mode = (stableAttr.Mode &^ 0170000) | 0040000
 	}
 	if stableAttr.Mode&0111 == 0 {
 		// Force execute bits
-
 		stableAttr.Mode |= 0755
+	}
+
+	// Handle type replacement scenario
+	if typeReplacement {
+		// This is type replacement: file was deleted, now creating directory
+		// CRITICAL: For type replacement, we need to ensure the source file is hidden
+		// The deletion marker in cache should prevent source file from being visible
+		// Update the xattr to reflect type replacement instead of just clearing it
+		typeReplacementAttr := xattr.XAttr{
+			PathStatus:       xattr.PathStatusNone, // Clear deleted status
+			CurrentType:      syscall.S_IFDIR,      // New type is directory
+			TypeReplaced:     true,                 // Mark as type replaced
+			CacheIndependent: true,                 // Keep independent
+		}
+
+		// Update the xattr with type replacement info
+		if setErrno := xattr.Set(p, &typeReplacementAttr); setErrno != 0 {
+			// If setting fails, try to remove the old xattr
+			xattr.Remove(p)
+		}
+	} else {
+		// Regular directory creation - ensure no old xattr exists
+		xattr.Remove(p)
+	}
+
+	// For type replacement, remove any existing child inode first
+	if typeReplacement {
+		existingChild := n.GetChild(name)
+		if existingChild != nil {
+			// Remove the existing child inode completely
+			n.RmChild(name)
+		}
 	}
 
 	ch := n.NewInode(ctx, node, stableAttr)
 
-	// Don't invalidate cache immediately after creation - this can cause issues
-	// n.NotifyEntry(name)
+	// For type replacement, invalidate parent directory content cache
+	// This helps ensure the new directory state is visible
+	if typeReplacement {
+		n.NotifyContent(0, 0)
+	}
 
 	return ch, 0
 }
@@ -234,13 +281,28 @@ func (n *ShadowNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 
 	cacheName := n.RebasePathUsingCache(name)
 
-	// set new xattr to indicate file is deleted
+	// Get original directory type before marking as deleted
+	var originalType uint32
+	var srcSt syscall.Stat_t
+	if err := syscall.Lstat(name, &srcSt); err == nil {
+		originalType = uint32(srcSt.Mode & syscall.S_IFMT)
+	} else {
+		// If source doesn't exist, check cache
+		var cacheSt syscall.Stat_t
+		if err := syscall.Lstat(cacheName, &cacheSt); err == nil {
+			originalType = uint32(cacheSt.Mode & syscall.S_IFMT)
+		}
+		// If neither exists, originalType remains 0 (unknown)
+	}
+
+	// set new xattr to indicate directory is deleted, storing original type
 	attr := xattr.XAttr{}
 	_, errno := xattr.Get(cacheName, &attr)
 	if errno != 0 {
 		return errno
 	}
 	attr.PathStatus |= xattr.PathStatusDeleted
+	attr.OriginalType = originalType
+	attr.CacheIndependent = true // Permanently independent after deletion (Phase 3.3)
 	return xattr.Set(cacheName, &attr)
 }
-

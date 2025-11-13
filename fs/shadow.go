@@ -231,13 +231,15 @@ func (n *ShadowNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut
 		if errno == 0 {
 			// File exists - check if it's deleted
 			var deleted bool
+			var attr xattr.XAttr
 			if n.helpers != nil {
 				deleted, errno = n.helpers.CheckFileDeleted(mirrorPath)
 			} else {
-				attr := xattr.XAttr{}
-				exists, errno := xattr.Get(mirrorPath, &attr)
-				if errno == 0 {
+				exists, getErrno := xattr.Get(mirrorPath, &attr)
+				if getErrno == 0 {
 					deleted = exists && xattr.IsPathDeleted(attr)
+				} else {
+					errno = getErrno
 				}
 			}
 
@@ -249,8 +251,37 @@ func (n *ShadowNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut
 				return nil, syscall.ENOENT
 			}
 
-			// File exists and is not deleted
-			st = *st2
+			// File exists and is not deleted - check for type replacement scenario
+			// If this is a directory in cache but there's a conflicting file in source,
+			// and we have type replacement markers, handle it specially
+			if st2.Mode&syscall.S_IFDIR != 0 {
+				// This is a directory in cache - check if there's a conflicting file in source
+				var srcSt syscall.Stat_t
+				if err := syscall.Lstat(p, &srcSt); err == nil {
+					// Source exists - check if it's a file (conflict)
+					if srcSt.Mode&syscall.S_IFREG != 0 {
+						// We have a directory in cache but file in source - check for type replacement
+						if attr.TypeReplaced || attr.CacheIndependent {
+							// This is a type replacement scenario - the cached directory should take precedence
+							// but we need to ensure the source file is properly hidden
+							st = *st2
+						} else {
+							// Not a type replacement - this is an unexpected conflict
+							// Return the cached directory but log the issue
+							st = *st2
+						}
+					} else {
+						// Source is also a directory - no conflict
+						st = *st2
+					}
+				} else {
+					// Source doesn't exist - no conflict
+					st = *st2
+				}
+			} else {
+				// Not a directory in cache - use as-is
+				st = *st2
+			}
 		} else {
 			// File doesn't exist - check xattr to see if it's marked as deleted
 			var deleted bool
@@ -658,6 +689,9 @@ func (n *ShadowNode) Create(ctx context.Context, name string, flags uint32, mode
 
 	}
 
+	// Invalidate parent directory cache to ensure kernel sees new file
+	n.NotifyContent(0, 0) // Invalidate entire directory content
+
 	return ch, lf, 0, 0
 }
 
@@ -871,10 +905,20 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 
 	lf := fs.NewLoopbackFile(f)
 
+	// Set appropriate cache flags based on file access pattern
+	// For write operations, use direct I/O to prevent aggressive caching
+	// This is especially important for type replacement scenarios
+	if forceCache {
+		fuseFlags |= fuse.FOPEN_DIRECT_IO
+	} else {
+		// For read-only operations, keep cache for better performance
+		fuseFlags |= fuse.FOPEN_KEEP_CACHE
+	}
+
 	// Note: Activity tracking happens in Write() method after actual writes occur
 	// Not tracking here to avoid premature tracking before copy-on-write completes
 
-	return lf, 0, 0
+	return lf, fuseFlags, 0
 }
 
 func (n *ShadowNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
