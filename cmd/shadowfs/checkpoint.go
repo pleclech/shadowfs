@@ -30,7 +30,7 @@ func runCheckpointCommand(args []string) {
 	if err != nil {
 		// Add helpful suggestion for git repository not found
 		if strings.Contains(err.Error(), "git repository not found") {
-			log.Fatalf("Failed to get git repository: %v\n\nTip: Did you enable git with -auto-git flag? Try: shadowfs -auto-git %s <srcdir>", err, *mountPoint)
+			log.Fatalf("Failed to get git repository: %v\n\nTip: Did you enable git with --auto-git flag? Try: shadowfs --auto-git %s <srcdir>", err, *mountPoint)
 		}
 		log.Fatalf("Failed to get git repository: %v", err)
 	}

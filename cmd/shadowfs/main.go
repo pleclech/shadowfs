@@ -52,6 +52,12 @@ func main() {
 		return
 	}
 
+	// Check for --version flag before subcommand parsing
+	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
+		PrintVersion()
+		return
+	}
+
 	// Check for subcommands BEFORE parsing flags
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -280,17 +286,18 @@ Commands:
   help        Show help for a command
 
 Flags for mount:
-  -debug                  Print ShadowFS debug data (filesystem-specific logging)
-  -debug-fuse             Print FUSE debug data (low-level FUSE operation logging)
-  -auto-git               Enable automatic Git versioning
-  -git-idle-timeout       Idle timeout for auto-commits (default: 30s)
-  -git-safety-window      Safety window delay after last write before committing (default: 5s)
-  -cache-dir              Custom cache directory (default: ~/.shadowfs, or $SHADOWFS_CACHE_DIR)
-  -daemon                 Run as daemon in background
+  -v, --version           Print version information and exit
+  --debug                 Print ShadowFS debug data (filesystem-specific logging)
+  --debug-fuse            Print FUSE debug data (low-level FUSE operation logging)
+  --auto-git              Enable automatic Git versioning
+  --git-idle-timeout      Idle timeout for auto-commits (default: 30s)
+  --git-safety-window     Safety window delay after last write before committing (default: 5s)
+  --cache-dir             Custom cache directory (default: ~/.shadowfs, or $SHADOWFS_CACHE_DIR)
+  --daemon                Run as daemon in background
 
 Examples:
   {binaryname} /mnt/shadow /home/user/source
-  {binaryname} -daemon /mnt/shadow /home/user/source
+  {binaryname} --daemon /mnt/shadow /home/user/source
   {binaryname} list
   {binaryname} info --mount-point /mnt/shadow
   {binaryname} stop --mount-point /mnt/shadow
@@ -329,8 +336,8 @@ Use "` + binaryName + ` version <command> --help" for command-specific help.
 		fmt.Print(`Usage: ` + binaryName + ` checkpoint [options]
 
 Options:
-  -mount-point string   Mount point path (required)
-  -file string          Create checkpoint for specific file
+  --mount-point string   Mount point path (required)
+  --file string          Create checkpoint for specific file
 
 Examples:
   ` + binaryName + ` checkpoint --mount-point /mnt/shadow
@@ -340,15 +347,15 @@ Examples:
 		fmt.Print(`Usage: ` + binaryName + ` sync [options]
 
 Options:
-  -mount-point string   Mount point path (required)
-  -dry-run             Show what would be synced without actually syncing
-  -backup              Create backup before syncing (default: true)
-  -no-backup           Skip backup (dangerous)
-  -rollback            Rollback last sync operation
-  -backup-id string    Backup ID for rollback
-  -file string         Sync only specific file
-  -dir string          Sync only specific directory tree
-  -force               Force sync even if conflicts detected
+  --mount-point string   Mount point path (required)
+  --dry-run              Show what would be synced without actually syncing
+  --backup               Create backup before syncing (default: true)
+  --no-backup            Skip backup (dangerous)
+  --rollback             Rollback last sync operation
+  --backup-id string     Backup ID for rollback
+  --file string          Sync only specific file
+  --dir string           Sync only specific directory tree
+  --force                Force sync even if conflicts detected
 
 Examples:
   ` + binaryName + ` sync --mount-point /mnt/shadow --dry-run
@@ -387,7 +394,7 @@ Examples:
 Shows detailed statistics for a specific mount point.
 
 Options:
-  -mount-point string   Mount point path (required)
+  --mount-point string   Mount point path (required)
 
 The output includes:
   - Mount information (mount point, source directory, cache directory, status)
@@ -403,7 +410,7 @@ Examples:
 Stops a running daemon process for a mount point.
 
 Options:
-  -mount-point string   Mount point path (required)
+  --mount-point string   Mount point path (required)
 
 Examples:
   ` + binaryName + ` stop --mount-point /mnt/shadow

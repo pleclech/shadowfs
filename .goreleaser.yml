@@ -26,6 +26,9 @@ builds:
       - -trimpath
     ldflags:
       - -s -w
+      - -X github.com/pleclech/shadowfs/cmd/shadowfs.Version={{.Version}}
+      - -X github.com/pleclech/shadowfs/cmd/shadowfs.Commit={{.Commit}}
+      - -X github.com/pleclech/shadowfs/cmd/shadowfs.BuildDate={{.Date}}
     env:
       - CGO_ENABLED=1
 
