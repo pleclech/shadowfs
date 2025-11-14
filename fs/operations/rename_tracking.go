@@ -1,6 +1,8 @@
 package operations
 
 import (
+	"fmt"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -14,20 +16,340 @@ type RenameMapping struct {
 	Depth      int    // Depth of rename operation
 }
 
+// RenameTrie is a path-component trie for efficient prefix matching of renamed paths
+type RenameTrie struct {
+	// If this node represents a renamed path:
+	renamedFrom      string // Original source path (relative to srcDir)
+	cacheIndependent bool   // Whether this path is independent
+
+	// Children map: component name -> child trie node
+	children map[string]*RenameTrie
+}
+
+// NewRenameTrie creates a new empty trie
+func NewRenameTrie() *RenameTrie {
+	return &RenameTrie{
+		children: make(map[string]*RenameTrie),
+	}
+}
+
+// Insert adds a rename mapping to the trie
+// destPath: current mount point path (e.g., "foo/baz")
+// renamedFrom: original source path (e.g., "foo/bar")
+// independent: whether this path is cache independent
+func (rt *RenameTrie) Insert(destPath, renamedFrom string, independent bool) {
+	// Normalize paths
+	destPath = strings.Trim(destPath, "/")
+	renamedFrom = strings.Trim(renamedFrom, "/")
+
+	fmt.Printf("[DEBUG Insert] destPath=%s, renamedFrom=%s, independent=%v\n", destPath, renamedFrom, independent)
+
+	if destPath == "" {
+		// Root path - store directly in this node
+		rt.renamedFrom = renamedFrom
+		rt.cacheIndependent = independent
+		fmt.Printf("[DEBUG Insert] Stored at root\n")
+		return
+	}
+
+	// Split into components
+	parts := strings.Split(destPath, "/")
+	current := rt
+
+	fmt.Printf("[DEBUG Insert] parts=%v\n", parts)
+
+	// Navigate/create path in trie
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+
+		fmt.Printf("[DEBUG Insert] Processing part[%d]=%s\n", i, part)
+
+		// Get or create child node
+		if current.children == nil {
+			current.children = make(map[string]*RenameTrie)
+			fmt.Printf("[DEBUG Insert] Created children map\n")
+		}
+		child, exists := current.children[part]
+		if !exists {
+			child = NewRenameTrie()
+			current.children[part] = child
+			fmt.Printf("[DEBUG Insert] Created new child node for %s\n", part)
+		} else {
+			fmt.Printf("[DEBUG Insert] Found existing child node for %s\n", part)
+		}
+
+		// If this is the last component, store rename info
+		if i == len(parts)-1 {
+			child.renamedFrom = renamedFrom
+			child.cacheIndependent = independent
+			fmt.Printf("[DEBUG Insert] Stored rename info: %s -> %s (independent=%v)\n", part, renamedFrom, independent)
+		}
+
+		current = child
+	}
+
+	fmt.Printf("[DEBUG Insert] Finished insert\n")
+}
+
+// Resolve finds the longest matching prefix and resolves the path
+// mountPointPath: path to resolve (e.g., "foo/baz/hello")
+// Returns: (resolvedPath, isIndependent, found)
+func (rt *RenameTrie) Resolve(mountPointPath string) (resolvedPath string, isIndependent bool, found bool) {
+	// Normalize path
+	mountPointPath = strings.Trim(mountPointPath, "/")
+	if mountPointPath == "" {
+		// Root path - check if root is renamed
+		if rt.renamedFrom != "" {
+			return rt.renamedFrom, rt.cacheIndependent, true
+		}
+		return "", false, false
+	}
+
+	// Debug for baz paths
+	debugBaz := strings.Contains(mountPointPath, "baz")
+	if debugBaz {
+		fmt.Printf("[DEBUG trie.Resolve] mountPointPath=%s\n", mountPointPath)
+		fmt.Printf("[DEBUG trie.Resolve] trie has children: %v\n", rt.children != nil)
+		if rt.children != nil {
+			fmt.Printf("[DEBUG trie.Resolve] children keys: %v\n", getMapKeys(rt.children))
+		}
+	}
+
+	// Split into components
+	parts := strings.Split(mountPointPath, "/")
+	current := rt
+	matchedPath := ""
+	bestMatch := ""
+	bestRenamedFrom := ""
+	bestIndependent := false
+
+	// Walk down the trie, tracking the best match
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+
+		if debugBaz {
+			fmt.Printf("[DEBUG trie.Resolve] Processing part[%d]=%s, matchedPath=%s\n", i, part, matchedPath)
+		}
+
+		// Check if current node has a rename (potential match)
+		if current.renamedFrom != "" {
+			bestMatch = matchedPath
+			bestRenamedFrom = current.renamedFrom
+			bestIndependent = current.cacheIndependent
+			if debugBaz {
+				fmt.Printf("[DEBUG trie.Resolve] Found rename at current node: %s -> %s\n", matchedPath, current.renamedFrom)
+			}
+		}
+
+		// Check if this path is independent - stop resolution
+		if current.cacheIndependent && current.renamedFrom != "" {
+			// Found independent path - return immediately
+			return "", true, true
+		}
+
+		// Try to continue down the trie
+		if current.children == nil {
+			if debugBaz {
+				fmt.Printf("[DEBUG trie.Resolve] No children, breaking\n")
+			}
+			break
+		}
+		child, exists := current.children[part]
+		if !exists {
+			if debugBaz {
+				fmt.Printf("[DEBUG trie.Resolve] Child '%s' not found, breaking\n", part)
+			}
+			break
+		}
+
+		if debugBaz {
+			fmt.Printf("[DEBUG trie.Resolve] Found child '%s', renamedFrom=%s\n", part, child.renamedFrom)
+		}
+
+		// Build matched path
+		if matchedPath == "" {
+			matchedPath = part
+		} else {
+			matchedPath = filepath.Join(matchedPath, part)
+		}
+
+		current = child
+
+		// Check if we've reached the end of the path
+		if i == len(parts)-1 {
+			// Final component - check if it has rename info or is independent
+			if current.renamedFrom != "" {
+				bestMatch = matchedPath
+				bestRenamedFrom = current.renamedFrom
+				bestIndependent = current.cacheIndependent
+				if debugBaz {
+					fmt.Printf("[DEBUG trie.Resolve] Final component has rename: %s -> %s\n", matchedPath, current.renamedFrom)
+				}
+			} else if current.cacheIndependent {
+				// Path is marked as independent (e.g., deleted) but not renamed
+				// Return it as found with independent=true
+				bestMatch = matchedPath
+				bestRenamedFrom = matchedPath // Use same path for independent paths
+				bestIndependent = true
+				if debugBaz {
+					fmt.Printf("[DEBUG trie.Resolve] Final component is independent: %s\n", matchedPath)
+				}
+			}
+		}
+	}
+
+	// If we found a match (either renamed or independent), resolve the path
+	if bestMatch != "" {
+		if bestRenamedFrom != "" {
+			// Calculate suffix (remaining path after matched prefix)
+			suffix := strings.TrimPrefix(mountPointPath, bestMatch)
+			suffix = strings.TrimPrefix(suffix, "/")
+
+			if suffix == "" {
+				// Exact match
+				resolvedPath = bestRenamedFrom
+			} else {
+				// Partial match - append suffix
+				resolvedPath = filepath.Join(bestRenamedFrom, suffix)
+			}
+
+			if debugBaz {
+				fmt.Printf("[DEBUG trie.Resolve] RESOLVED: %s -> %s (independent=%v)\n", mountPointPath, resolvedPath, bestIndependent)
+			}
+			return resolvedPath, bestIndependent, true
+		} else if bestIndependent {
+			// Independent path without rename - return as-is
+			if debugBaz {
+				fmt.Printf("[DEBUG trie.Resolve] INDEPENDENT: %s (independent=%v)\n", mountPointPath, bestIndependent)
+			}
+			return mountPointPath, true, true
+		}
+	}
+
+	if debugBaz {
+		fmt.Printf("[DEBUG trie.Resolve] NO MATCH for %s (bestMatch=%s, bestRenamedFrom=%s)\n", mountPointPath, bestMatch, bestRenamedFrom)
+	}
+	return "", false, false
+}
+
+// Helper function to get map keys for debugging
+func getMapKeys(m map[string]*RenameTrie) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// Remove removes a rename mapping from the trie
+func (rt *RenameTrie) Remove(destPath string) {
+	destPath = strings.Trim(destPath, "/")
+	if destPath == "" {
+		// Remove root rename
+		rt.renamedFrom = ""
+		rt.cacheIndependent = false
+		return
+	}
+
+	parts := strings.Split(destPath, "/")
+	current := rt
+
+	// Navigate to the node
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+
+		if current.children == nil {
+			return // Path doesn't exist
+		}
+
+		child, exists := current.children[part]
+		if !exists {
+			return // Path doesn't exist
+		}
+
+		// If this is the last component, clear rename info
+		if i == len(parts)-1 {
+			child.renamedFrom = ""
+			child.cacheIndependent = false
+
+			// If node has no children and no rename info, remove it
+			if len(child.children) == 0 {
+				delete(current.children, part)
+			}
+			return
+		}
+
+		current = child
+	}
+}
+
+// SetIndependent marks a path as independent in the trie
+func (rt *RenameTrie) SetIndependent(destPath string) {
+	destPath = strings.Trim(destPath, "/")
+	if destPath == "" {
+		// Root path
+		rt.cacheIndependent = true
+		return
+	}
+
+	parts := strings.Split(destPath, "/")
+	current := rt
+
+	// Navigate to the node
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+
+		if current.children == nil {
+			// Path doesn't exist in trie - create it
+			if current.children == nil {
+				current.children = make(map[string]*RenameTrie)
+			}
+			current.children[part] = NewRenameTrie()
+		}
+
+		child, exists := current.children[part]
+		if !exists {
+			child = NewRenameTrie()
+			current.children[part] = child
+		}
+
+		// If this is the last component, mark as independent
+		if i == len(parts)-1 {
+			child.cacheIndependent = true
+			return
+		}
+
+		current = child
+	}
+}
+
 // RenameTracker manages hierarchical rename tracking
 type RenameTracker struct {
-	mappings map[string]*RenameMapping // key: destPath, value: mapping
+	mappings map[string]*RenameMapping // key: destPath, value: mapping (kept for backward compatibility)
+	trie     *RenameTrie               // Trie for efficient prefix matching
 }
 
 // NewRenameTracker creates a new rename tracker
 func NewRenameTracker() *RenameTracker {
 	return &RenameTracker{
 		mappings: make(map[string]*RenameMapping),
+		trie:     NewRenameTrie(),
 	}
 }
 
 // StoreRenameMapping stores a rename mapping with depth calculation
-func (rt *RenameTracker) StoreRenameMapping(sourcePath, destPath string) {
+// sourcePath: original source path (relative to srcDir, e.g., "foo/bar")
+// destPath: destination path (relative to mount point, e.g., "foo/baz")
+// independent: whether this path is cache independent
+func (rt *RenameTracker) StoreRenameMapping(sourcePath, destPath string, independent ...bool) {
 	depth := rt.calculateDepth(sourcePath)
 	mapping := &RenameMapping{
 		SourcePath: sourcePath,
@@ -35,54 +357,98 @@ func (rt *RenameTracker) StoreRenameMapping(sourcePath, destPath string) {
 		Depth:      depth,
 	}
 	rt.mappings[destPath] = mapping
+
+	// Also store in trie for efficient lookup
+	isIndependent := false
+	if len(independent) > 0 {
+		isIndependent = independent[0]
+	}
+	fmt.Printf("[DEBUG StoreRenameMapping] destPath=%s, sourcePath=%s, isIndependent=%v\n", destPath, sourcePath, isIndependent)
+	fmt.Printf("[DEBUG StoreRenameMapping] RenameTracker=%p, trie=%p\n", rt, rt.trie)
+	fmt.Printf("[DEBUG StoreRenameMapping] Before insert, trie contents:\n%s\n", rt.trie.Dump(""))
+	rt.trie.Insert(destPath, sourcePath, isIndependent)
+	fmt.Printf("[DEBUG StoreRenameMapping] After insert, trie contents:\n%s\n", rt.trie.Dump(""))
 }
 
 // ResolveRenamedPath resolves the original source path for a renamed directory
-// Converts: /foo/baz/hello/world -> /foo/bar/hello/world
-func (rt *RenameTracker) ResolveRenamedPath(requestedPath string) (string, bool) {
-	// Normalize path to ensure consistent comparison
-	requestedPath = strings.TrimRight(requestedPath, "/")
-	if requestedPath == "" {
-		requestedPath = "/"
-	}
-	
-	// Check if requested path is under a renamed directory
-	// Find the longest matching prefix (most specific rename)
-	longestMatch := ""
-	var bestMapping *RenameMapping
-	
-	for destPrefix, mapping := range rt.mappings {
-		normalizedPrefix := strings.TrimRight(destPrefix, "/")
-		if normalizedPrefix == "" {
-			normalizedPrefix = "/"
+// Converts: foo/baz/hello/world -> foo/bar/hello/world
+// Returns: (resolvedPath, isIndependent, found)
+func (rt *RenameTracker) ResolveRenamedPath(requestedPath string) (resolvedPath string, isIndependent bool, found bool) {
+	// Normalize path
+	requestedPath = strings.Trim(requestedPath, "/")
+
+	// Debug for baz paths
+	if strings.Contains(requestedPath, "baz") {
+		fmt.Printf("[DEBUG ResolveRenamedPath] requestedPath=%s\n", requestedPath)
+		fmt.Printf("[DEBUG ResolveRenamedPath] rt=%p, trie=%p\n", rt, rt.trie)
+		if rt.trie != nil {
+			fmt.Printf("[DEBUG ResolveRenamedPath] trie contents:\n%s\n", rt.trie.Dump(""))
 		}
-		
-		// Check if requested path starts with this prefix
-		if requestedPath == normalizedPrefix || strings.HasPrefix(requestedPath, normalizedPrefix+"/") {
-			// Use the longest matching prefix (most specific)
-			if len(normalizedPrefix) > len(longestMatch) {
-				longestMatch = normalizedPrefix
-				bestMapping = mapping
+	}
+
+	// Use trie for efficient O(m) resolution
+	resolved, independent, found := rt.trie.Resolve(requestedPath)
+
+	if strings.Contains(requestedPath, "baz") {
+		fmt.Printf("[DEBUG ResolveRenamedPath] result: resolved=%s, independent=%v, found=%v\n", resolved, independent, found)
+	}
+
+	return resolved, independent, found
+}
+
+// RemoveRenameMapping removes a rename mapping from both map and trie
+func (rt *RenameTracker) RemoveRenameMapping(destPath string) {
+	delete(rt.mappings, destPath)
+	rt.trie.Remove(destPath)
+}
+
+// SetIndependent marks a path as independent in the trie
+// This is used when a path becomes independent (e.g., after deletion)
+func (rt *RenameTracker) SetIndependent(destPath string) {
+	destPath = strings.Trim(destPath, "/")
+	fmt.Printf("[DEBUG SetIndependent] destPath=%s, RenameTracker=%p, trie=%p\n", destPath, rt, rt.trie)
+	if rt.trie != nil {
+		fmt.Printf("[DEBUG SetIndependent] Before SetIndependent, trie contents:\n%s\n", rt.trie.Dump(""))
+		rt.trie.SetIndependent(destPath)
+		fmt.Printf("[DEBUG SetIndependent] After SetIndependent, trie contents:\n%s\n", rt.trie.Dump(""))
+	}
+}
+
+// DumpTrie returns a string representation of all mappings in the trie
+// Useful for debugging
+func (rt *RenameTracker) DumpTrie() string {
+	if rt == nil {
+		return "<nil RenameTracker>\n"
+	}
+	if rt.trie == nil {
+		return "<nil trie>\n"
+	}
+	result := rt.trie.Dump("")
+	if result == "" {
+		return "<empty trie>\n"
+	}
+	return result
+}
+
+// Dump returns a string representation of the trie starting at the given prefix
+func (rt *RenameTrie) Dump(prefix string) string {
+	var result strings.Builder
+
+	if rt.renamedFrom != "" {
+		result.WriteString(fmt.Sprintf("%s -> %s (independent=%v)\n", prefix, rt.renamedFrom, rt.cacheIndependent))
+	}
+
+	if rt.children != nil {
+		for name, child := range rt.children {
+			childPrefix := name
+			if prefix != "" {
+				childPrefix = prefix + "/" + name
 			}
+			result.WriteString(child.Dump(childPrefix))
 		}
 	}
-	
-	if bestMapping != nil {
-		// Convert: /foo/baz/hello/world -> /foo/bar/hello/world
-		relativePath := strings.TrimPrefix(requestedPath, longestMatch)
-		if relativePath == "" {
-			// Exact match - return source path
-			return bestMapping.SourcePath, true
-		}
-		// Ensure relative path starts with /
-		if !strings.HasPrefix(relativePath, "/") {
-			relativePath = "/" + relativePath
-		}
-		originalPath := bestMapping.SourcePath + relativePath
-		return originalPath, true
-	}
-	
-	return requestedPath, false
+
+	return result.String()
 }
 
 // calculateDepth calculates the depth of a path
@@ -102,4 +468,3 @@ func StoreRenameInXAttr(path string, originalSourcePath, renamedFromPath string,
 	xattrMgr := xattr.NewManager()
 	return xattrMgr.SetRenameMapping(path, originalSourcePath, renamedFromPath, depth)
 }
-

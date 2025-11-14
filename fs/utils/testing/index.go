@@ -24,14 +24,15 @@ func IndentMessage(level int, message string) string {
 }
 
 func DirListUsingLs(dir string, t *testing.T) {
+	t.Helper()
 	Debug(t, fmt.Sprintf("Debug list the directory: %s", dir))
 	lsCmd := exec.Command("ls", "-la")
 	lsCmd.Dir = dir
 	out, err := lsCmd.CombinedOutput()
 	if err != nil {
-		Failf(t, "Failed to list directory: %v, output: %s", err, string(out))
+		Failf(t, "Failed to list directory %s: %v, output: %s", dir, err, string(out))
 	}
-	Info(t, fmt.Sprintf("Directory list: %s", string(out)))
+	Info(t, fmt.Sprintf("Directory list of %s: %s", dir, string(out)))
 }
 
 func ShouldCreateDir(path string, t *testing.T, levels ...int) {

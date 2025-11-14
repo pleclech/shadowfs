@@ -2,8 +2,10 @@ package fs
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"unsafe"
 
@@ -11,16 +13,41 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 
 	"github.com/pleclech/shadowfs/fs/operations"
+	"github.com/pleclech/shadowfs/fs/pathutil"
 	"github.com/pleclech/shadowfs/fs/utils"
 	"github.com/pleclech/shadowfs/fs/xattr"
 )
 
 func (n *ShadowNode) Opendir(ctx context.Context) syscall.Errno {
-	fd, err := syscall.Open(n.FullPath(true), syscall.O_DIRECTORY, 0755)
+	mountPointPath := n.FullPath(true)
+
+	// Use PathResolver to resolve paths
+	cachePath, sourcePath, isIndependent, errno := n.pathResolver.ResolveForRead(mountPointPath)
+	if errno == syscall.ENOENT {
+		return syscall.ENOENT
+	}
+	if errno != 0 {
+		return errno
+	}
+
+	// Check cache first
+	if fd, err := syscall.Open(cachePath, syscall.O_DIRECTORY, 0755); err == nil {
+		utils.PreserveOwner(ctx, cachePath)
+		syscall.Close(fd)
+		return fs.OK
+	}
+
+	// If independent, don't check source
+	if isIndependent {
+		return syscall.ENOENT
+	}
+
+	// Fall back to source path (resolved if renamed)
+	fd, err := syscall.Open(sourcePath, syscall.O_DIRECTORY, 0755)
 	if err != nil {
 		return fs.ToErrno(err)
 	}
-	utils.PreserveOwner(ctx, n.FullPath(true))
+	utils.PreserveOwner(ctx, sourcePath)
 	syscall.Close(fd)
 	return fs.OK
 }
@@ -28,8 +55,25 @@ func (n *ShadowNode) Opendir(ctx context.Context) syscall.Errno {
 // OpendirHandle is called by go-fuse for READDIRPLUS operations
 // This is the method that actually returns the DirStream, not Readdir
 func (n *ShadowNode) OpendirHandle(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
+	mountPointPath := n.FullPath(true)
+
+	// Use PathResolver to resolve paths
+	cachePath, sourcePath, isIndependent, errno := n.pathResolver.ResolveForRead(mountPointPath)
+	if errno == syscall.ENOENT {
+		return nil, 0, syscall.ENOENT
+	}
+	if errno != 0 {
+		return nil, 0, errno
+	}
+
 	// Preserve ownership of the directory (important when running as root)
-	utils.PreserveOwner(ctx, n.FullPath(true))
+	// Use cache path if exists, otherwise use resolved source path
+	pathToPreserve := cachePath
+	var st syscall.Stat_t
+	if err := syscall.Lstat(cachePath, &st); err != nil && !isIndependent {
+		pathToPreserve = sourcePath
+	}
+	utils.PreserveOwner(ctx, pathToPreserve)
 
 	// Use clean directory operation per Phase 4.1
 	// This resolves renamed paths and ensures source entries come from correct location
@@ -108,8 +152,12 @@ func (n *ShadowNode) Mkdir(ctx context.Context, name string, mode uint32, out *f
 			// File or directory exists - remove it first
 			if existingSt.Mode&syscall.S_IFDIR != 0 {
 				// It's a directory - remove it
+				// CRITICAL: Check if directory is empty before removing
+				// If it contains deletion markers, they should have been removed by Rmdir
+				// But if directory still exists, we need to remove it
 				if err := syscall.Rmdir(p); err != nil {
-					// If rmdir fails, try to remove xattr anyway
+					// If rmdir fails (e.g., directory not empty), try to remove xattr anyway
+					// and continue - we'll try to create the directory anyway
 					xattr.Remove(p)
 				} else {
 					// Directory removed successfully, also remove xattr
@@ -129,6 +177,22 @@ func (n *ShadowNode) Mkdir(ctx context.Context, name string, mode uint32, out *f
 			// File/directory doesn't exist, but xattr might still be there - remove it
 			xattr.Remove(p)
 		}
+		// Clear rename mapping if path was renamed before deletion
+		// Recreation after deletion creates independent path (not linked to source)
+		if n.renameTracker != nil {
+			mountPointPath := pathutil.RebaseToMountPoint(p, n.mountPoint, n.cachePath)
+			mountPointPath = strings.TrimPrefix(mountPointPath, n.mountPoint)
+			mountPointPath = strings.TrimPrefix(mountPointPath, "/")
+			if mountPointPath != "" {
+				n.renameTracker.RemoveRenameMapping(mountPointPath)
+			}
+		}
+		// Clear rename mapping from xattr
+		if n.xattrMgr != nil {
+			n.xattrMgr.ClearRenameMapping(p)
+		}
+		// Mark as independent (recreated path is not linked to source)
+		n.setCacheIndependent(p)
 	}
 
 	// Ensure parent directory has execute permissions before creating child
@@ -158,18 +222,25 @@ func (n *ShadowNode) Mkdir(ctx context.Context, name string, mode uint32, out *f
 	// Check if directory already exists in cache before creating
 	// If it exists and is marked as deleted, remove it first
 	var existingSt syscall.Stat_t
+	fmt.Printf("[DEBUG Mkdir] Checking if directory exists: p=%s\n", p)
 	if err := syscall.Lstat(p, &existingSt); err == nil {
+		fmt.Printf("[DEBUG Mkdir] Directory exists in cache: p=%s\n", p)
 		// Path exists in cache - check if it's marked as deleted
 		existingAttr := xattr.XAttr{}
 		if exists, errno := xattr.Get(p, &existingAttr); errno == 0 && exists && xattr.IsPathDeleted(existingAttr) {
 			// Path is marked as deleted - remove it first
 			if existingSt.Mode&syscall.S_IFDIR != 0 {
 				// It's a directory - remove it
+				// CRITICAL: Even if Rmdir already removed it, try again to be safe
+				// This handles race conditions where directory was recreated from source
 				if err := syscall.Rmdir(p); err != nil && !os.IsNotExist(err) {
-					return nil, fs.ToErrno(err)
+					// If rmdir fails (e.g., directory not empty), try to remove xattr anyway
+					// and continue - we'll try to create the directory anyway
+					xattr.Remove(p)
+				} else {
+					// Directory removed successfully (or didn't exist), also remove xattr
+					xattr.Remove(p)
 				}
-				// Remove xattr after removing directory
-				xattr.Remove(p)
 			} else {
 				// It's a file - unlink it
 				if err := syscall.Unlink(p); err != nil && !os.IsNotExist(err) {
@@ -178,6 +249,23 @@ func (n *ShadowNode) Mkdir(ctx context.Context, name string, mode uint32, out *f
 				// Remove xattr after removing file
 				xattr.Remove(p)
 			}
+			// Clear rename mapping if path was renamed before deletion
+			// Recreation after deletion creates independent path (not linked to source)
+			if n.renameTracker != nil {
+				mountPointPath := pathutil.RebaseToMountPoint(p, n.mountPoint, n.cachePath)
+				mountPointPath = strings.TrimPrefix(mountPointPath, n.mountPoint)
+				mountPointPath = strings.TrimPrefix(mountPointPath, "/")
+				if mountPointPath != "" {
+					n.renameTracker.RemoveRenameMapping(mountPointPath)
+				}
+			}
+			// Clear rename mapping from xattr
+			if n.xattrMgr != nil {
+				n.xattrMgr.ClearRenameMapping(p)
+			}
+			// Mark as independent (recreated path is not linked to source)
+			n.setCacheIndependent(p)
+			// After removing deleted directory, continue to create new one
 		} else if existingSt.Mode&syscall.S_IFDIR != 0 {
 			// Directory exists and is not marked as deleted - this is fine, we'll reuse it
 			// Ensure it has proper permissions
@@ -208,8 +296,10 @@ func (n *ShadowNode) Mkdir(ctx context.Context, name string, mode uint32, out *f
 	}
 
 	// Use os.Mkdir - it's simpler and handles mode correctly
+	fmt.Printf("[DEBUG Mkdir] Creating directory: p=%s, fileMode=%v\n", p, fileMode)
 	err = os.Mkdir(p, fileMode)
 	if err != nil {
+		fmt.Printf("[DEBUG Mkdir] os.Mkdir failed: p=%s, err=%v\n", p, err)
 		// Handle case where directory already exists (idempotent operation)
 		if os.IsExist(err) {
 			// Directory exists, verify it's actually a directory
@@ -456,6 +546,17 @@ func (n *ShadowNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 	// Mark as deleted with permanent independence
 	if errno := n.deletion.HandlePermanentIndependence(cacheName); errno != 0 {
 		return errno
+	}
+	// Update trie to mark path as independent
+	if n.renameTracker != nil {
+		// Convert cache path to mount point relative path
+		mountPointPath := pathutil.RebaseToMountPoint(cacheName, n.mountPoint, n.cachePath)
+		mountPointPath = strings.TrimPrefix(mountPointPath, n.mountPoint)
+		mountPointPath = strings.TrimPrefix(mountPointPath, "/")
+		fmt.Printf("[DEBUG Rmdir] cacheName=%s, mountPointPath=%s\n", cacheName, mountPointPath)
+		if mountPointPath != "" {
+			n.renameTracker.SetIndependent(mountPointPath)
+		}
 	}
 	// Update original type in xattr (preserving PathStatusDeleted and CacheIndependent)
 	attr := xattr.XAttr{}

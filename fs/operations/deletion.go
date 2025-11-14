@@ -23,6 +23,7 @@ func NewDeletion() *Deletion {
 // - Set CacheIndependent = true (all deleted items are permanently independent)
 // - Set PathStatus = PathStatusDeleted
 // - Prevent source reconnection
+// - Clear rename mapping since path is now independent
 func (d *Deletion) HandlePermanentIndependence(path string) syscall.Errno {
 	attr, exists, errno := d.xattrMgr.GetStatus(path)
 	if errno != 0 && errno != syscall.ENODATA {
@@ -38,7 +39,13 @@ func (d *Deletion) HandlePermanentIndependence(path string) syscall.Errno {
 	}
 	
 	// All deleted items are permanently independent (detached from source)
-	// SetDeleted already sets CacheIndependent = true
-	return d.xattrMgr.SetDeleted(path, originalType)
+	// SetDeleted already sets CacheIndependent = true and clears rename fields
+	if errno := d.xattrMgr.SetDeleted(path, originalType); errno != 0 {
+		return errno
+	}
+	
+	// Explicitly clear rename mapping to ensure it's removed
+	// (SetCacheIndependent in SetDeleted should have done this, but be explicit)
+	return d.xattrMgr.ClearRenameMapping(path)
 }
 

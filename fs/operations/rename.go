@@ -3,12 +3,14 @@ package operations
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 
 	"github.com/pleclech/shadowfs/fs/cache"
 	"github.com/pleclech/shadowfs/fs/pathutil"
+	"github.com/pleclech/shadowfs/fs/xattr"
 )
 
 // RenameOperation handles rename operations with all constraints per Phase 2
@@ -17,6 +19,7 @@ type RenameOperation struct {
 	srcDir       string
 	cachePath    string
 	renameTracker *RenameTracker
+	xattrMgr     *xattr.Manager
 }
 
 // NewRenameOperation creates a new rename operation handler
@@ -29,6 +32,7 @@ func NewRenameOperation(cacheMgr *cache.Manager, srcDir, cachePath string, renam
 		srcDir:        srcDir,
 		cachePath:     cachePath,
 		renameTracker: renameTracker,
+		xattrMgr:      xattr.NewManager(),
 	}
 }
 
@@ -93,12 +97,21 @@ func (op *RenameOperation) renameInCache(sourcePath, destPath string, flags uint
 		return errno
 	}
 	
-	// Update rename tracking if this is a directory rename
-	if st.Mode&syscall.S_IFDIR != 0 {
-		// Store rename mapping for directory
-		op.renameTracker.StoreRenameMapping(sourcePath, destPath)
-		// Store in xattr for persistence
-		StoreRenameInXAttr(destCachePath, sourcePath, sourcePath, op.renameTracker.calculateDepth(sourcePath))
+	// Store rename mapping in xattr for both files and directories
+	// Convert absolute sourcePath to relative path (relative to srcDir)
+	sourcePathRelative := strings.TrimPrefix(sourcePath, op.srcDir)
+	sourcePathRelative = strings.TrimPrefix(sourcePathRelative, "/")
+	destPathRelative := strings.TrimPrefix(destPath, op.srcDir)
+	destPathRelative = strings.TrimPrefix(destPathRelative, "/")
+	
+	// Store in-memory tracker for performance (lazy population)
+	// Renamed items are NOT independent initially (they still depend on source)
+	op.renameTracker.StoreRenameMapping(sourcePathRelative, destPathRelative, false)
+	
+	// Store in xattr for persistence (both files and directories)
+	depth := op.renameTracker.calculateDepth(sourcePath)
+	if errno := op.xattrMgr.SetRenameMapping(destCachePath, sourcePathRelative, sourcePathRelative, depth); errno != 0 {
+		return errno
 	}
 	
 	return 0
@@ -178,25 +191,32 @@ func (op *RenameOperation) copyOnWriteRename(
 			destCachePath = createdPath
 		}
 		
-		// Store rename mapping for directory
-		op.renameTracker.StoreRenameMapping(sourcePath, destPath)
-		// Store in xattr
-		StoreRenameInXAttr(destCachePath, sourcePath, sourcePath, op.renameTracker.calculateDepth(sourcePath))
 	} else {
 		// File: copy using provided copy function
 		if errno := copyFile(sourcePath, destCachePath, uint32(srcSt.Mode)); errno != 0 {
 			return errno
 		}
-		// Copy ownership and timestamps
+		// Copy ownership (timestamps are best-effort and platform-specific)
 		if err := syscall.Chown(destCachePath, int(srcSt.Uid), int(srcSt.Gid)); err != nil {
-			return fs.ToErrno(err)
+			// Best-effort - continue even if chown fails
 		}
-		var times [2]syscall.Timespec
-		times[0] = syscall.Timespec{Sec: srcSt.Atim.Sec, Nsec: srcSt.Atim.Nsec}
-		times[1] = syscall.Timespec{Sec: srcSt.Mtim.Sec, Nsec: srcSt.Mtim.Nsec}
-		if err := syscall.UtimesNano(destCachePath, times[:]); err != nil {
-			return fs.ToErrno(err)
-		}
+	}
+	
+	// Store rename mapping in xattr for both files and directories
+	// Convert absolute sourcePath to relative path (relative to srcDir)
+	sourcePathRelative := strings.TrimPrefix(sourcePath, op.srcDir)
+	sourcePathRelative = strings.TrimPrefix(sourcePathRelative, "/")
+	destPathRelative := strings.TrimPrefix(destPath, op.srcDir)
+	destPathRelative = strings.TrimPrefix(destPathRelative, "/")
+	
+	// Store in-memory tracker for performance (both files and directories)
+	// Renamed items are NOT independent initially (they still depend on source)
+	op.renameTracker.StoreRenameMapping(sourcePathRelative, destPathRelative, false)
+	
+	// Store in xattr for persistence (both files and directories)
+	depth := op.renameTracker.calculateDepth(sourcePath)
+	if errno := op.xattrMgr.SetRenameMapping(destCachePath, sourcePathRelative, sourcePathRelative, depth); errno != 0 {
+		return errno
 	}
 	
 	// 3. Mark source location as deleted IN CACHE (not in source!)
@@ -210,7 +230,8 @@ func (op *RenameOperation) copyOnWriteRename(
 }
 
 // ResolveRenamedPath resolves renamed paths for directory operations
-func (op *RenameOperation) ResolveRenamedPath(requestedPath string) (string, bool) {
+// Returns: (resolvedPath, isIndependent, found)
+func (op *RenameOperation) ResolveRenamedPath(requestedPath string) (string, bool, bool) {
 	return op.renameTracker.ResolveRenamedPath(requestedPath)
 }
 

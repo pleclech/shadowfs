@@ -147,9 +147,7 @@ func (n *ShadowNode) Write(ctx context.Context, f fs.FileHandle, data []byte, of
 							}
 						}
 						// Once copied, file becomes independent of source
-						if n.xattrMgr != nil {
-							n.xattrMgr.SetCacheIndependent(cachePath)
-						}
+						n.setCacheIndependent(cachePath)
 					}
 				}
 				// If file is already independent, no COW needed
@@ -174,11 +172,7 @@ func (n *ShadowNode) Write(ctx context.Context, f fs.FileHandle, data []byte, of
 						}
 					}
 					// Mark as independent after copying
-					if n.xattrMgr != nil {
-						if errno := n.xattrMgr.SetCacheIndependent(cachePath); errno != 0 {
-							// Log error but continue - COW already happened
-						}
-					}
+					n.setCacheIndependent(cachePath)
 				}
 			}
 		}

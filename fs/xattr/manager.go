@@ -44,6 +44,7 @@ func (m *Manager) SetTypeReplaced(path string, originalType, currentType uint32)
 }
 
 // SetCacheIndependent marks a path as permanently independent
+// When a path becomes independent, clear rename-related fields since they're no longer needed
 func (m *Manager) SetCacheIndependent(path string) syscall.Errno {
 	attr := XAttr{}
 	exists, errno := Get(path, &attr)
@@ -55,6 +56,28 @@ func (m *Manager) SetCacheIndependent(path string) syscall.Errno {
 		attr = XAttr{}
 	}
 	attr.CacheIndependent = true
+	// Clear rename-related fields when path becomes independent
+	attr.SetRenamedFromPath("")
+	attr.SetOriginalSourcePath("")
+	attr.RenameDepth = 0
+	return Set(path, &attr)
+}
+
+// ClearRenameMapping clears rename-related fields from xattr
+func (m *Manager) ClearRenameMapping(path string) syscall.Errno {
+	attr := XAttr{}
+	exists, errno := Get(path, &attr)
+	if errno != 0 && errno != syscall.ENODATA {
+		return errno
+	}
+	if !exists {
+		// No xattr exists, nothing to clear
+		return 0
+	}
+	// Clear rename-related fields
+	attr.SetRenamedFromPath("")
+	attr.SetOriginalSourcePath("")
+	attr.RenameDepth = 0
 	return Set(path, &attr)
 }
 
