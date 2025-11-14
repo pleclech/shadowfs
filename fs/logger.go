@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -31,6 +32,23 @@ func (l LogLevel) String() string {
 		return "ERROR"
 	default:
 		return "UNKNOWN"
+	}
+}
+
+func LogLevelFromString(level string) LogLevel {
+	level = strings.ToUpper(level)
+
+	switch level {
+	case "DEBUG":
+		return LogLevelDebug
+	case "INFO":
+		return LogLevelInfo
+	case "WARN":
+		return LogLevelWarn
+	case "ERROR":
+		return LogLevelError
+	default:
+		return LogLevelInfo
 	}
 }
 

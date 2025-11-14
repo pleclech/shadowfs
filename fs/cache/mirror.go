@@ -166,7 +166,14 @@ func CreateMirroredFileOrDir(srcPath, cachePath, srcDir string) (string, error) 
 }
 
 // CopyFileSimple copies a file from source to destination (fallback when helpers not available)
+// Note: Parent directory must exist - caller is responsible for ensuring it
 func CopyFileSimple(srcPath, destPath string, mode uint32) syscall.Errno {
+	// Ensure parent directory exists (defensive check)
+	destDir := filepath.Dir(destPath)
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		return fs.ToErrno(err)
+	}
+
 	srcFd, err := syscall.Open(srcPath, syscall.O_RDONLY, 0)
 	if err != nil {
 		return fs.ToErrno(err)

@@ -31,3 +31,11 @@ func Remove(path string) syscall.Errno {
 	return syscall.ENOTSUP
 }
 
+// List lists all extended attribute names for a given path
+// This is a stub implementation for non-Linux platforms
+// Extended attributes are not supported on this platform
+func List(path string) ([]string, syscall.Errno) {
+	// Extended attributes not supported on this platform
+	return nil, syscall.ENOTSUP
+}
+

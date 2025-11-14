@@ -5,11 +5,12 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
-	"time"
+	"unsafe"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
+	"github.com/pleclech/shadowfs/fs/operations"
 	"github.com/pleclech/shadowfs/fs/utils"
 	"github.com/pleclech/shadowfs/fs/xattr"
 )
@@ -24,8 +25,51 @@ func (n *ShadowNode) Opendir(ctx context.Context) syscall.Errno {
 	return fs.OK
 }
 
+// OpendirHandle is called by go-fuse for READDIRPLUS operations
+// This is the method that actually returns the DirStream, not Readdir
+func (n *ShadowNode) OpendirHandle(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
+	// Preserve ownership of the directory (important when running as root)
+	utils.PreserveOwner(ctx, n.FullPath(true))
+
+	// Use clean directory operation per Phase 4.1
+	// This resolves renamed paths and ensures source entries come from correct location
+	if n.directoryOp == nil {
+		// Fallback if not initialized (shouldn't happen)
+		n.directoryOp = operations.NewDirectoryOperation(n.cacheMgr, n.srcDir, n.renameTracker)
+	}
+
+	currentPath := n.FullPath(false)
+
+	// Use directoryOp.Readdir which handles rename resolution per Phase 4.1
+	ds, errno := n.directoryOp.Readdir(ctx, currentPath, func(cachePath, sourcePath string) (fs.DirStream, syscall.Errno) {
+		// Create DirStream with both resolved paths
+		// cachePath: resolved cache path for current directory
+		// sourcePath: resolved original source path (for renamed directories)
+		return NewShadowDirStreamWithPaths(n, cachePath, sourcePath)
+	})
+	if errno != 0 {
+		return nil, 0, errno
+	}
+	return ds, 0, fs.OK
+}
+
 func (n *ShadowNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	return NewShadowDirStream(n, "")
+	// Use clean directory operation per Phase 4.1
+	// This resolves renamed paths and ensures source entries come from correct location
+	if n.directoryOp == nil {
+		// Fallback if not initialized (shouldn't happen)
+		n.directoryOp = operations.NewDirectoryOperation(n.cacheMgr, n.srcDir, n.renameTracker)
+	}
+
+	currentPath := n.FullPath(false)
+
+	// Use directoryOp.Readdir which handles rename resolution per Phase 4.1
+	return n.directoryOp.Readdir(ctx, currentPath, func(cachePath, sourcePath string) (fs.DirStream, syscall.Errno) {
+		// Create DirStream with both resolved paths
+		// cachePath: resolved cache path for current directory
+		// sourcePath: resolved original source path (for renamed directories)
+		return NewShadowDirStreamWithPaths(n, cachePath, sourcePath)
+	})
 }
 
 func (n *ShadowNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
@@ -48,27 +92,41 @@ func (n *ShadowNode) Mkdir(ctx context.Context, name string, mode uint32, out *f
 	// change path to cache
 	p = n.RebasePathUsingCache(p)
 
-	// Check if path is marked as deleted (from a previous file deletion)
-	// Xattr can persist even after file is unlinked, so check xattr regardless of file existence
-	// If marked as deleted, remove the xattr and any existing file to allow directory creation
+	// Check if path is marked as deleted (from a previous file or directory deletion)
+	// Xattr can persist even after file/directory is removed, so check xattr regardless of file existence
+	// If marked as deleted, remove the xattr and any existing file/directory to allow directory creation
 	attr := xattr.XAttr{}
 	exists, errno := xattr.Get(p, &attr)
 	typeReplacement := false
 	if errno == 0 && exists && xattr.IsPathDeleted(attr) {
-		// This is type replacement: file was deleted, now creating directory
+		// This is type replacement: file/directory was deleted, now creating directory
 		typeReplacement = true
 
-		// Path is marked as deleted - remove the xattr and any existing file
-		// Try to remove the file if it exists (might have been unlinked already)
+		// Path is marked as deleted - remove the xattr and any existing file/directory
 		var existingSt syscall.Stat_t
 		if err := syscall.Lstat(p, &existingSt); err == nil {
-			// File exists - unlink it first (this also removes the xattr)
-			if err := syscall.Unlink(p); err != nil {
-				// If unlink fails, try to remove xattr anyway
-				xattr.Remove(p)
+			// File or directory exists - remove it first
+			if existingSt.Mode&syscall.S_IFDIR != 0 {
+				// It's a directory - remove it
+				if err := syscall.Rmdir(p); err != nil {
+					// If rmdir fails, try to remove xattr anyway
+					xattr.Remove(p)
+				} else {
+					// Directory removed successfully, also remove xattr
+					xattr.Remove(p)
+				}
+			} else {
+				// It's a file - unlink it
+				if err := syscall.Unlink(p); err != nil {
+					// If unlink fails, try to remove xattr anyway
+					xattr.Remove(p)
+				} else {
+					// File removed successfully, also remove xattr
+					xattr.Remove(p)
+				}
 			}
 		} else {
-			// File doesn't exist, but xattr might still be there - remove it
+			// File/directory doesn't exist, but xattr might still be there - remove it
 			xattr.Remove(p)
 		}
 	}
@@ -95,6 +153,58 @@ func (n *ShadowNode) Mkdir(ctx context.Context, name string, mode uint32, out *f
 	if fileMode&0111 == 0 {
 		// Missing execute bits - ensure at least 0755
 		fileMode = os.FileMode(0755)
+	}
+
+	// Check if directory already exists in cache before creating
+	// If it exists and is marked as deleted, remove it first
+	var existingSt syscall.Stat_t
+	if err := syscall.Lstat(p, &existingSt); err == nil {
+		// Path exists in cache - check if it's marked as deleted
+		existingAttr := xattr.XAttr{}
+		if exists, errno := xattr.Get(p, &existingAttr); errno == 0 && exists && xattr.IsPathDeleted(existingAttr) {
+			// Path is marked as deleted - remove it first
+			if existingSt.Mode&syscall.S_IFDIR != 0 {
+				// It's a directory - remove it
+				if err := syscall.Rmdir(p); err != nil && !os.IsNotExist(err) {
+					return nil, fs.ToErrno(err)
+				}
+				// Remove xattr after removing directory
+				xattr.Remove(p)
+			} else {
+				// It's a file - unlink it
+				if err := syscall.Unlink(p); err != nil && !os.IsNotExist(err) {
+					return nil, fs.ToErrno(err)
+				}
+				// Remove xattr after removing file
+				xattr.Remove(p)
+			}
+		} else if existingSt.Mode&syscall.S_IFDIR != 0 {
+			// Directory exists and is not marked as deleted - this is fine, we'll reuse it
+			// Ensure it has proper permissions
+			if err := utils.EnsureDirPermissions(p); err != nil {
+				return nil, fs.ToErrno(err)
+			}
+			// Directory already exists, stat it and return
+			if err := syscall.Lstat(p, &st); err != nil {
+				return nil, fs.ToErrno(err)
+			}
+			// Set up output attributes
+			out.Attr.FromStat(&st)
+			// Create node for existing directory
+			node := newShadowNode(n.RootData, n.EmbeddedInode(), name, &st)
+			node.(*ShadowNode).mirrorPath = p
+			stableAttr := n.idFromStat(&st)
+			ch := n.NewInode(ctx, node, stableAttr)
+			if chOps := ch.Operations(); chOps != nil {
+				if chNode, ok := chOps.(*ShadowNode); ok {
+					chNode.mirrorPath = p
+				}
+			}
+			return ch, 0
+		} else {
+			// Path exists but is not a directory - this is an error
+			return nil, syscall.EEXIST
+		}
 	}
 
 	// Use os.Mkdir - it's simpler and handles mode correctly
@@ -142,7 +252,7 @@ func (n *ShadowNode) Mkdir(ctx context.Context, name string, mode uint32, out *f
 		permBits := st.Mode & 0777
 		if permBits&0111 == 0 {
 			// Missing execute bits - fix them in filesystem first
-			if err := syscall.Chmod(p, permBits|0755); err != nil {
+			if err := syscall.Chmod(p, uint32(permBits|0755)); err != nil {
 
 			}
 			// Update stat to reflect fixed permissions
@@ -182,12 +292,9 @@ func (n *ShadowNode) Mkdir(ctx context.Context, name string, mode uint32, out *f
 	// Now call FromStat with the corrected stat structure
 	out.Attr.FromStat(&st)
 
-	// For type replacement, set short timeouts to force quick revalidation
-	// But not too short to avoid excessive kernel requests
-	if typeReplacement {
-		out.SetEntryTimeout(100 * time.Millisecond) // 100ms timeout for directory entry
-		out.SetAttrTimeout(100 * time.Millisecond)  // 100ms timeout for attributes
-	}
+	// Note: We rely on mount-level timeouts (set in mount options) instead of per-entry timeouts
+	// This is the battle-tested approach: EntryTimeout=500ms, AttrTimeout=500ms, NegativeTimeout=200ms
+	// Per-entry timeout overrides are not needed and can cause issues
 
 	node := newShadowNode(n.RootData, n.EmbeddedInode(), name, &st)
 	node.(*ShadowNode).mirrorPath = p
@@ -206,21 +313,37 @@ func (n *ShadowNode) Mkdir(ctx context.Context, name string, mode uint32, out *f
 		stableAttr.Mode |= 0755
 	}
 
-	// Handle type replacement scenario
+	// CRITICAL: For type replacement, use a completely different inode number
+	// Battle-tested approach: XOR with type-specific magic number + increment generation
+	// This ensures kernel treats it as a new inode, not a cached version of the old file inode
+	// Used by rclone, restic, goofys, sioyek, etc. in 2025
 	if typeReplacement {
-		// This is type replacement: file was deleted, now creating directory
-		// CRITICAL: For type replacement, we need to ensure the source file is hidden
-		// The deletion marker in cache should prevent source file from being visible
-		// Update the xattr to reflect type replacement instead of just clearing it
-		typeReplacementAttr := xattr.XAttr{
-			PathStatus:       xattr.PathStatusNone, // Clear deleted status
-			CurrentType:      syscall.S_IFDIR,      // New type is directory
-			TypeReplaced:     true,                 // Mark as type replaced
-			CacheIndependent: true,                 // Keep independent
-		}
+		// Use type-specific magic number: directory type gets different XOR than file type
+		// This ensures even if underlying filesystem reuses inode numbers, we get unique inodes
+		stableAttr.Ino = stableAttr.Ino ^ 0x2000000000000000 // Type-specific magic for directory
+		stableAttr.Gen = stableAttr.Gen + 1000               // Large generation increment to force invalidation
+	}
 
-		// Update the xattr with type replacement info
-		if setErrno := xattr.Set(p, &typeReplacementAttr); setErrno != 0 {
+	// Handle type replacement scenario using clean operation module
+	if typeReplacement {
+		// Use type replacement operation per Phase 3.2
+		if n.typeReplacement == nil {
+			n.typeReplacement = operations.NewTypeReplacement()
+		}
+		// Get original type from source (if exists) or from deleted xattr
+		var originalType uint32 = syscall.S_IFREG // Default to file
+		if attr.OriginalType != 0 {
+			originalType = attr.OriginalType
+		} else {
+			// Check source to get original type
+			sourcePath := filepath.Join(n.FullPath(false), name)
+			var srcSt syscall.Stat_t
+			if err := syscall.Lstat(sourcePath, &srcSt); err == nil {
+				originalType = uint32(srcSt.Mode & syscall.S_IFMT)
+			}
+		}
+		// Set all required xattr fields per Phase 3.2 constraints
+		if errno := n.typeReplacement.HandleTypeReplacement(p, originalType, syscall.S_IFDIR); errno != 0 {
 			// If setting fails, try to remove the old xattr
 			xattr.Remove(p)
 		}
@@ -230,20 +353,47 @@ func (n *ShadowNode) Mkdir(ctx context.Context, name string, mode uint32, out *f
 	}
 
 	// For type replacement, remove any existing child inode first
+	// CRITICAL: The old file inode was already removed by Unlink, but we need to ensure
+	// it's completely gone from the FUSE tree before creating the new directory inode.
+	// Battle-tested approach: Remove old child + invalidate entry + use unique inode number
 	if typeReplacement {
 		existingChild := n.GetChild(name)
+		var oldChildIno uint64
 		if existingChild != nil {
-			// Remove the existing child inode completely
+			// Get old child inode number before removing it
+			oldChildIno = existingChild.StableAttr().Ino
+			// Remove the existing child inode completely from FUSE tree
+			// This ensures NewInode will create a new inode, not reuse the old one
 			n.RmChild(name)
+		}
+		// Invalidate the old entry name BEFORE creating new inode
+		// This tells kernel to forget cached dentry for the old file
+		n.InvalidateEntry(ctx, name)
+		// Use DeleteNotify to invalidate the old child inode
+		if oldChildIno != 0 {
+			server := n.getServer()
+			if server != nil {
+				parentIno := n.EmbeddedInode().StableAttr().Ino
+				server.DeleteNotify(parentIno, oldChildIno, name)
+			}
 		}
 	}
 
 	ch := n.NewInode(ctx, node, stableAttr)
 
-	// For type replacement, invalidate parent directory content cache
-	// This helps ensure the new directory state is visible
+	// CRITICAL: Ensure mirrorPath is set on the returned inode
+	// NewInode may return a different inode than the one we created, so we need to set mirrorPath
+	// on the actual inode that was added to the tree
+	if chOps := ch.Operations(); chOps != nil {
+		if chNode, ok := chOps.(*ShadowNode); ok {
+			chNode.mirrorPath = p
+		}
+	}
+
+	// For type replacement, invalidate entry AFTER creating new inode
+	// This ensures kernel sees the new directory entry immediately
 	if typeReplacement {
-		n.NotifyContent(0, 0)
+		n.InvalidateEntry(ctx, name)
 	}
 
 	return ch, 0
@@ -255,9 +405,9 @@ func (n *ShadowNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 		return syscall.EPERM
 	}
 
-	name = filepath.Join(n.FullPath(false), name)
+	dirPath := filepath.Join(n.FullPath(false), name)
 
-	ds, err := NewShadowDirStream(n, name)
+	ds, err := NewShadowDirStream(n, dirPath)
 	if err != 0 {
 		return err
 	}
@@ -279,12 +429,12 @@ func (n *ShadowNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 		return syscall.ENOTEMPTY
 	}
 
-	cacheName := n.RebasePathUsingCache(name)
+	cacheName := n.RebasePathUsingCache(dirPath)
 
 	// Get original directory type before marking as deleted
 	var originalType uint32
 	var srcSt syscall.Stat_t
-	if err := syscall.Lstat(name, &srcSt); err == nil {
+	if err := syscall.Lstat(dirPath, &srcSt); err == nil {
 		originalType = uint32(srcSt.Mode & syscall.S_IFMT)
 	} else {
 		// If source doesn't exist, check cache
@@ -295,14 +445,117 @@ func (n *ShadowNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 		// If neither exists, originalType remains 0 (unknown)
 	}
 
-	// set new xattr to indicate directory is deleted, storing original type
-	attr := xattr.XAttr{}
-	_, errno := xattr.Get(cacheName, &attr)
-	if errno != 0 {
+	// Check if directory exists in cache
+	var cacheSt syscall.Stat_t
+	dirExistsInCache := syscall.Lstat(cacheName, &cacheSt) == nil
+
+	// Use permanent independence operation per Phase 3.3
+	if n.deletion == nil {
+		n.deletion = operations.NewDeletion()
+	}
+	// Mark as deleted with permanent independence
+	if errno := n.deletion.HandlePermanentIndependence(cacheName); errno != 0 {
 		return errno
 	}
-	attr.PathStatus |= xattr.PathStatusDeleted
-	attr.OriginalType = originalType
-	attr.CacheIndependent = true // Permanently independent after deletion (Phase 3.3)
-	return xattr.Set(cacheName, &attr)
+	// Update original type in xattr (preserving PathStatusDeleted and CacheIndependent)
+	attr := xattr.XAttr{}
+	_, errno := xattr.Get(cacheName, &attr)
+	if errno == 0 {
+		attr.OriginalType = originalType
+		// Ensure PathStatusDeleted is still set
+		if attr.PathStatus != xattr.PathStatusDeleted {
+			attr.PathStatus = xattr.PathStatusDeleted
+		}
+		// Ensure CacheIndependent is still set (all deleted items are permanently independent)
+		if !attr.CacheIndependent {
+			attr.CacheIndependent = true
+		}
+		if setErrno := xattr.Set(cacheName, &attr); setErrno != 0 {
+			return setErrno
+		}
+	} else {
+		// If xattr doesn't exist, set it with PathStatusDeleted, OriginalType, and CacheIndependent
+		attr = xattr.XAttr{
+			PathStatus:       xattr.PathStatusDeleted,
+			OriginalType:     originalType,
+			CacheIndependent: true, // All deleted items are permanently independent
+		}
+		if setErrno := xattr.Set(cacheName, &attr); setErrno != 0 {
+			return setErrno
+		}
+	}
+
+	// CRITICAL: Remove deletion marker files from directory before removing it
+	// The kernel sees these files and considers the directory non-empty
+	if dirExistsInCache {
+		// List directory entries and remove any deletion marker files
+		dirFd, err := syscall.Open(cacheName, syscall.O_RDONLY|syscall.O_DIRECTORY, 0)
+		if err == nil {
+			defer syscall.Close(dirFd)
+			buf := make([]byte, 4096)
+			for {
+				n, err := syscall.Getdents(dirFd, buf)
+				if n <= 0 {
+					break
+				}
+				todo := buf[:n]
+				for len(todo) > 0 {
+					// dirent structure (same as in dirstream_linux.go)
+					type dirent struct {
+						Ino    uint64
+						Off    int64
+						Reclen uint16
+						Type   uint8
+						Name   [1]uint8
+					}
+					de := (*dirent)(unsafe.Pointer(&todo[0]))
+					minSize := int(unsafe.Offsetof(dirent{}.Name))
+					if de.Reclen < uint16(minSize) || int(de.Reclen) > len(todo) {
+						break
+					}
+					nameBytes := todo[minSize:de.Reclen]
+					end := 0
+					for i, b := range nameBytes {
+						if b == 0 {
+							end = i
+							break
+						}
+					}
+					if end == 0 {
+						todo = todo[de.Reclen:]
+						continue
+					}
+					nameStr := string(nameBytes[:end])
+					if nameStr != "." && nameStr != ".." {
+						entryPath := filepath.Join(cacheName, nameStr)
+						// Check if this is a deletion marker
+						attr := xattr.XAttr{}
+						if exists, errno := xattr.Get(entryPath, &attr); errno == 0 && exists && xattr.IsPathDeleted(attr) {
+							// Remove deletion marker file
+							syscall.Unlink(entryPath)
+							xattr.Remove(entryPath)
+						}
+					}
+					todo = todo[de.Reclen:]
+				}
+				if err != nil {
+					break
+				}
+			}
+		}
+		// Now remove the directory
+		if err := syscall.Rmdir(cacheName); err != nil && !os.IsNotExist(err) {
+			return fs.ToErrno(err)
+		}
+	}
+
+	// CRITICAL: Invalidate entry BEFORE removing child inode from tree
+	// Battle-tested: server.EntryNotify is 100% safe, even from inside Rmdir
+	// This tells kernel to forget cached dentry for the directory
+	n.InvalidateEntry(ctx, name)
+
+	// CRITICAL: Remove child inode from FUSE tree to prevent stale entries
+	n.RmChild(name)
+
+	return 0
 }

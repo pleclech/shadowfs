@@ -15,7 +15,6 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 
 	"github.com/pleclech/shadowfs/fs/xattr"
-	"golang.org/x/sys/unix"
 )
 
 type step int
@@ -51,7 +50,12 @@ func NewShadowDirStream(root *ShadowNode, originPath string) (fs.DirStream, sysc
 	}
 
 	cachePath := root.RebasePathUsingCache(originPath)
+	return NewShadowDirStreamWithPaths(root, cachePath, originPath)
+}
 
+// NewShadowDirStreamWithPaths creates a DirStream with explicit cache and source paths
+// This is used by directoryOp.Readdir to pass resolved paths (for renamed directories)
+func NewShadowDirStreamWithPaths(root *ShadowNode, cachePath, sourcePath string) (fs.DirStream, syscall.Errno) {
 	// check if the directory is not deleted in cache
 	attr := xattr.XAttr{}
 	xattr.Get(cachePath, &attr)
@@ -63,8 +67,8 @@ func NewShadowDirStream(root *ShadowNode, originPath string) (fs.DirStream, sysc
 	ds := &ShadowDirStream{
 		dir:        nil,
 		root:       root,
-		originPath: originPath,
-		cachePath:  cachePath,
+		originPath: sourcePath, // Use resolved source path (may be original path for renamed dirs)
+		cachePath:  cachePath,  // Use provided cache path
 		seen:       make(map[string]struct{}),
 		todoIndex:  0,
 	}
@@ -170,12 +174,19 @@ func (ds *ShadowDirStream) processCacheEntries() bool {
 			return true
 		}
 
-		ds.seen[next.Name] = struct{}{}
-
-		if !ds.isDeleted(next.Name) {
-			ds.nextDirEntry = &next
-			return true
+		// Check if deleted BEFORE adding to seen
+		// Cache priority: deleted entries in cache override source entries
+		if ds.isDeleted(next.Name) {
+			// Mark as seen so source entry is also skipped
+			ds.seen[next.Name] = struct{}{}
+			// Skip deleted entries from cache
+			continue
 		}
+
+		// Not deleted - add to seen and return
+		ds.seen[next.Name] = struct{}{}
+		ds.nextDirEntry = &next
+		return true
 	}
 	return false
 }
@@ -203,6 +214,13 @@ func (ds *ShadowDirStream) processOriginEntries() bool {
 			return true
 		}
 
+		// Check if this source entry is marked as deleted in cache
+		// Cache priority: if deleted in cache, don't show from source
+		if ds.isDeleted(next.Name) {
+			// Skip deleted entries from source
+			continue
+		}
+
 		if _, seen := ds.seen[next.Name]; !seen {
 			ds.nextDirEntry = &next
 			return true
@@ -215,7 +233,14 @@ func (ds *ShadowDirStream) isDeleted(name string) bool {
 	fullPath := filepath.Join(ds.cachePath, name)
 	attr := xattr.XAttr{}
 	exists, errno := xattr.Get(fullPath, &attr)
-	return errno == 0 && exists && xattr.IsPathDeleted(attr)
+	// If xattr exists and is marked as deleted, return true
+	if errno == 0 && exists {
+		return xattr.IsPathDeleted(attr)
+	}
+	// If there's an error reading xattr (file doesn't exist or xattr doesn't exist), it's not deleted
+	// Note: We check xattr even if file doesn't exist physically, because deletion markers
+	// are files with xattr. If the file doesn't exist and has no xattr, it's not deleted.
+	return false
 }
 
 func (ds *ShadowDirStream) next() (fuse.DirEntry, syscall.Errno) {
@@ -312,4 +337,3 @@ func (ds *ShadowDirStream) load() syscall.Errno {
 
 	return fs.OK
 }
-

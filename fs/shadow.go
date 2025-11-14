@@ -7,12 +7,12 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
 	"github.com/pleclech/shadowfs/fs/cache"
+	"github.com/pleclech/shadowfs/fs/operations"
 	"github.com/pleclech/shadowfs/fs/pathutil"
 	"github.com/pleclech/shadowfs/fs/rootinit"
 	"github.com/pleclech/shadowfs/fs/utils"
@@ -29,12 +29,28 @@ type ShadowNode struct {
 	mountID     string
 	mirrorPath  string
 
+	// Stored in root node and accessible to all child nodes
+	server *fuse.Server
+
 	// Helper utilities
 	helpers *ShadowNodeHelpers
 
 	// Git functionality (optional)
 	gitManager      *GitManager
 	activityTracker *ActivityTracker
+
+	// Clean operation handlers
+	cacheMgr        *cache.Manager
+	xattrMgr        *xattr.Manager
+	renameOp        *operations.RenameOperation
+	lookupOp        *operations.LookupOperation
+	directoryOp     *operations.DirectoryOperation
+	typeReplacement *operations.TypeReplacement
+	deletion        *operations.Deletion
+	renameTracker   *operations.RenameTracker
+
+	// Track recently truncated files to prevent COW after truncation
+	truncatedFiles map[string]bool
 }
 
 func (n *ShadowNode) GetMountPoint() string {
@@ -43,6 +59,59 @@ func (n *ShadowNode) GetMountPoint() string {
 
 func (n *ShadowNode) GetMountID() string {
 	return n.mountID
+}
+
+// SetServer stores the FUSE server reference for safe entry invalidation
+func (n *ShadowNode) SetServer(server *fuse.Server) {
+	n.server = server
+	// Propagate to all existing child nodes (they inherit via newShadowNode)
+}
+
+// getServer gets the server reference, traversing up to root if needed
+func (n *ShadowNode) getServer() *fuse.Server {
+	if n.server != nil {
+		return n.server
+	}
+	// Try to get from root node
+	if root := n.Root(); root != nil {
+		if ops := root.Operations(); ops != nil {
+			if rootNode, ok := ops.(*ShadowNode); ok {
+				return rootNode.server
+			}
+		}
+	}
+	return nil
+}
+
+func (n *ShadowNode) InvalidateEntry(ctx context.Context, name string) {
+	server := n.getServer()
+	if server == nil {
+		// Server not set yet - this is OK, just skip
+		return
+	}
+	parentInode := n.EmbeddedInode()
+	if parentInode == nil {
+		return
+	}
+	// Get parent inode number (uint64) from StableAttr
+	parentIno := parentInode.StableAttr().Ino
+	server.EntryNotify(parentIno, name)
+}
+
+// InvalidateNegativeEntry safely invalidates a negative dentry (useful after rm)
+func (n *ShadowNode) InvalidateNegativeEntry(ctx context.Context, name string) {
+	server := n.getServer()
+	if server == nil {
+		// Server not set yet - this is OK, just skip
+		return
+	}
+	parentInode := n.EmbeddedInode()
+	if parentInode == nil {
+		return
+	}
+	// Get parent inode number (uint64) from StableAttr
+	parentIno := parentInode.StableAttr().Ino
+	server.EntryNotify(parentIno, name)
 }
 
 // InitGitManager initializes Git functionality for auto-versioning
@@ -148,6 +217,10 @@ func (n *ShadowNode) FullPath(useCache bool) string {
 			return
 		}
 		path = n.Path(root)
+		// Debug: Log path resolution for nested directories
+		if strings.Contains(path, "level") {
+			Debug("FullPath: n.Path(root)=%s, RootData.Path=%s", path, n.RootData.Path)
+		}
 	}()
 
 	if path == "" {
@@ -155,7 +228,12 @@ func (n *ShadowNode) FullPath(useCache bool) string {
 		return n.RootData.Path
 	}
 
-	return filepath.Join(n.RootData.Path, path)
+	result := filepath.Join(n.RootData.Path, path)
+	// Debug: Log final path for nested directories
+	if strings.Contains(result, "level") {
+		Debug("FullPath: final path=%s", result)
+	}
+	return result
 }
 
 func (n *ShadowNode) IsCached(path string) bool {
@@ -201,176 +279,131 @@ func (n *ShadowNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut
 		return nil, syscall.EPERM
 	}
 
-	p := filepath.Join(n.FullPath(false), name)
+	// Verify parent is actually a directory before proceeding
+	// This handles type replacement scenarios where the parent might have been a file before
+	var parentSt syscall.Stat_t
+	parentIsDir := false
 
-	// Cache independence: We check cache first, then fall back to source.
-	// Note: Source directory changes during mount are not detected by design
-	// to maintain cache independence and prevent data loss. Users should
-	// unmount before modifying the source directory.
-	mirrorPath := n.RebasePathUsingCache(p)
+	// Check mirrorPath first (most reliable for type replacement)
+	if n.mirrorPath != "" {
+		if err := syscall.Lstat(n.mirrorPath, &parentSt); err == nil {
+			parentIsDir = parentSt.Mode&syscall.S_IFDIR != 0
+		}
+	}
 
+	// Fall back to cache path, then source path
+	if !parentIsDir {
+		parentPathCache := n.FullPath(true)
+		if parentPathCache != "" && parentPathCache != n.RootData.Path {
+			if err := syscall.Lstat(parentPathCache, &parentSt); err == nil {
+				parentIsDir = parentSt.Mode&syscall.S_IFDIR != 0
+			}
+		}
+	}
+
+	if !parentIsDir {
+		parentPathSource := n.FullPath(false)
+		if parentPathSource != "" && parentPathSource != n.RootData.Path {
+			if err := syscall.Lstat(parentPathSource, &parentSt); err == nil {
+				parentIsDir = parentSt.Mode&syscall.S_IFDIR != 0
+			}
+		}
+	}
+
+	if !parentIsDir {
+		return nil, syscall.ENOTDIR
+	}
+
+	// Use clean lookup operation per Phase 1.2
+	if n.lookupOp == nil {
+		// Fallback if not initialized (shouldn't happen)
+		n.lookupOp = operations.NewLookupOperation(n.cacheMgr, n.srcDir)
+	}
+
+	// Resolve parent path using rename tracking (for renamed directories)
+	parentPath := n.FullPath(false)
+	if n.renameTracker != nil {
+		resolvedPath, isRenamed := n.renameTracker.ResolveRenamedPath(parentPath)
+		if isRenamed {
+			parentPath = resolvedPath
+		}
+	}
+
+	sourcePath := filepath.Join(parentPath, name)
+	cachePath := n.cacheMgr.ResolveCachePath(sourcePath)
+
+	// Check if parent directory is type-replaced BEFORE trying to look up child
+	// If parent is type-replaced (file -> directory), we MUST NOT fall back to source
+	// because source still has the old file, and Lstat will fail with "not a directory"
+	parentTypeReplaced := false
+	if n.mirrorPath != "" && n.xattrMgr != nil {
+		attr, exists, errno := n.xattrMgr.GetStatus(n.mirrorPath)
+		if errno == 0 && exists && attr.TypeReplaced {
+			parentTypeReplaced = true
+		}
+	}
+
+	// 1. Check cache first (CACHE PRIORITY - Principle 2)
 	var st syscall.Stat_t
+	var mirrorPath string
 
-	if mirrorPath != n.cachePath {
-		// Optimize: check file existence first, then xattr only if file exists or might be deleted
-		// This reduces syscalls when file doesn't exist
-		var st2 *syscall.Stat_t
-		var errno syscall.Errno
-
-		if n.helpers != nil {
-			st2, errno = n.helpers.StatFile(mirrorPath, false)
-		} else {
-			// Fallback: check file existence
-			st2 = &syscall.Stat_t{}
-			err := syscall.Lstat(mirrorPath, st2)
-			if err != nil {
-				errno = fs.ToErrno(err)
-			}
+	if err := syscall.Lstat(cachePath, &st); err == nil {
+		// File exists in cache - check if deleted
+		deleted, errno := n.cacheMgr.IsDeleted(sourcePath)
+		if errno != 0 && errno != syscall.ENODATA {
+			return nil, errno
+		}
+		if deleted {
+			return nil, syscall.ENOENT
 		}
 
-		if errno == 0 {
-			// File exists - check if it's deleted
-			var deleted bool
-			var attr xattr.XAttr
-			if n.helpers != nil {
-				deleted, errno = n.helpers.CheckFileDeleted(mirrorPath)
-			} else {
-				exists, getErrno := xattr.Get(mirrorPath, &attr)
-				if getErrno == 0 {
-					deleted = exists && xattr.IsPathDeleted(attr)
-				} else {
-					errno = getErrno
-				}
-			}
-
-			if errno != 0 {
-				return nil, errno
-			}
-
-			if deleted {
-				return nil, syscall.ENOENT
-			}
-
-			// File exists and is not deleted - check for type replacement scenario
-			// If this is a directory in cache but there's a conflicting file in source,
-			// and we have type replacement markers, handle it specially
-			if st2.Mode&syscall.S_IFDIR != 0 {
-				// This is a directory in cache - check if there's a conflicting file in source
-				var srcSt syscall.Stat_t
-				if err := syscall.Lstat(p, &srcSt); err == nil {
-					// Source exists - check if it's a file (conflict)
-					if srcSt.Mode&syscall.S_IFREG != 0 {
-						// We have a directory in cache but file in source - check for type replacement
-						if attr.TypeReplaced || attr.CacheIndependent {
-							// This is a type replacement scenario - the cached directory should take precedence
-							// but we need to ensure the source file is properly hidden
-							st = *st2
-						} else {
-							// Not a type replacement - this is an unexpected conflict
-							// Return the cached directory but log the issue
-							st = *st2
-						}
-					} else {
-						// Source is also a directory - no conflict
-						st = *st2
-					}
-				} else {
-					// Source doesn't exist - no conflict
-					st = *st2
-				}
-			} else {
-				// Not a directory in cache - use as-is
-				st = *st2
-			}
-		} else {
-			// File doesn't exist - check xattr to see if it's marked as deleted
-			var deleted bool
-			if n.helpers != nil {
-				deleted, errno = n.helpers.CheckFileDeleted(mirrorPath)
-			} else {
-				attr := xattr.XAttr{}
-				exists, errno := xattr.Get(mirrorPath, &attr)
-				if errno == 0 {
-					deleted = exists && xattr.IsPathDeleted(attr)
-				}
-			}
-
-			if errno != 0 {
-				return nil, errno
-			}
-
-			if deleted {
-				return nil, syscall.ENOENT
-			}
-
-			// File doesn't exist and is not deleted - check source
-			mirrorPath = ""
-		}
+		// Cache entry found - use it
+		mirrorPath = cachePath
 	} else {
+		// 2. Check if path is marked as deleted in cache
+		deleted, errno := n.cacheMgr.IsDeleted(sourcePath)
+		if errno != 0 && errno != syscall.ENODATA {
+			return nil, errno
+		}
+		if deleted {
+			return nil, syscall.ENOENT
+		}
+
+		// 3. Fall back to source (read-only access)
+		// If parent is type-replaced, don't fall back to source because source still has the old file
+		if parentTypeReplaced {
+			return nil, syscall.ENOENT
+		}
+
+		if err := syscall.Lstat(sourcePath, &st); err != nil {
+			return nil, fs.ToErrno(err)
+		}
 		mirrorPath = ""
 	}
 
-	if mirrorPath == "" {
-		// check if file exist in srcDir
-		var st2 *syscall.Stat_t
-		var errno syscall.Errno
-
-		if n.helpers != nil {
-			st2, errno = n.helpers.StatFile(p, false)
-		} else {
-			// Fallback to original method
-			st2 = &syscall.Stat_t{}
-			err := syscall.Lstat(p, st2)
-			if err != nil {
-				errno = fs.ToErrno(err)
-			}
-		}
-
-		if errno != 0 {
-			return nil, errno
-		}
-		st = *st2
-	}
-
-	// Check if it's a directory and fix permissions if needed BEFORE FromStat
-	// CRITICAL: Always check and fix permissions for directories, especially .git
-	// This ensures git can always traverse directories it creates
+	// Fix directory permissions if needed
 	if st.Mode&syscall.S_IFDIR != 0 {
-		// It's a directory - ALWAYS ensure execute permissions are set
-		// Don't just check - always fix to prevent any possibility of wrong permissions
-		// This is critical for FUSE filesystems where kernel might cache wrong attributes
 		pathToFix := mirrorPath
 		if pathToFix == "" {
-			pathToFix = p
+			pathToFix = sourcePath
 		}
-		// Fix permissions immediately - don't wait
-		if err := utils.EnsureDirPermissions(pathToFix); err != nil {
-
-			// Continue - we'll fix st.Mode below
-		} else {
-			// Re-stat after fixing to get correct permissions
+		if err := utils.EnsureDirPermissions(pathToFix); err == nil {
+			// Re-stat after fixing
 			if mirrorPath != "" {
-				if err2 := syscall.Lstat(mirrorPath, &st); err2 == nil {
-					// st now has correct permissions
-				}
+				syscall.Lstat(mirrorPath, &st)
 			} else {
-				if err2 := syscall.Lstat(p, &st); err2 == nil {
-					// st now has correct permissions
-				}
+				syscall.Lstat(sourcePath, &st)
 			}
 		}
-
-		// Ensure st.Mode has correct execute bits BEFORE FromStat
+		// Ensure execute bits
 		permBits := st.Mode & 0777
 		if permBits&0111 == 0 {
-			// Fix execute bits in stat structure
 			st.Mode = (st.Mode &^ 0777) | (permBits | 0755)
 		}
 	}
 
-	// create new inode
+	// Create new inode
 	out.Attr.FromStat(&st)
-
 	rootData := n.RootData
 	inode := newShadowNode(rootData, n.EmbeddedInode(), name, &st)
 
@@ -378,7 +411,9 @@ func (n *ShadowNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut
 		shadowNode.mirrorPath = mirrorPath
 	}
 
-	ch := n.NewInode(ctx, inode, n.idFromStat(&st))
+	stableAttr := n.idFromStat(&st)
+
+	ch := n.NewInode(ctx, inode, stableAttr)
 
 	return ch, 0
 }
@@ -422,11 +457,23 @@ func (n *ShadowNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.Att
 	// This handles cases where file was renamed after mirrorPath was set
 	cachedPath := n.RebasePathUsingCache(p)
 	if err := syscall.Lstat(cachedPath, &st); err == nil {
-		// File exists in cache - use cached file's attributes
-
+		// File exists in cache - check if it's marked as deleted
+		attr := xattr.XAttr{}
+		if exists, errno := xattr.Get(cachedPath, &attr); errno == 0 && exists && xattr.IsPathDeleted(attr) {
+			// File is marked as deleted - return ENOENT
+			return syscall.ENOENT
+		}
+		// File exists in cache and is not deleted - use cached file's attributes
 		p = cachedPath
 	} else {
-		// File not in cache, use original path
+		// File not in cache, check if it's marked as deleted in cache anyway
+		// (deletion markers might exist even if the file doesn't)
+		attr := xattr.XAttr{}
+		if exists, errno := xattr.Get(cachedPath, &attr); errno == 0 && exists && xattr.IsPathDeleted(attr) {
+			// File is marked as deleted - return ENOENT
+			return syscall.ENOENT
+		}
+		// File not in cache and not marked as deleted, use original path
 		if &n.Inode == n.Root() {
 			err = syscall.Stat(p, &st)
 		} else {
@@ -490,12 +537,7 @@ func (n *ShadowNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.Att
 
 	out.FromStat(&st)
 
-	// CRITICAL: For files in cache, set very short cache timeout
-	// This forces the kernel to requery attributes frequently, preventing stale size issues
-	if n.mirrorPath != "" && strings.HasPrefix(p, n.cachePath) && st.Mode&syscall.S_IFREG != 0 {
-		out.SetTimeout(100 * time.Millisecond) // 100ms timeout for cache files
-
-	}
+	// Use mount-level timeouts (set in mount options) - no per-entry override needed
 
 	return fs.OK
 }
@@ -585,8 +627,6 @@ func (n *ShadowNode) Create(ctx context.Context, name string, flags uint32, mode
 		return nil, nil, 0, syscall.EPERM
 	}
 
-	// CRITICAL: Use source path first to ensure consistent path resolution
-	// This prevents race conditions where parent directory state is inconsistent
 	sourcePath := filepath.Join(n.FullPath(false), name)
 	p := n.RebasePathUsingCache(sourcePath)
 
@@ -622,12 +662,9 @@ func (n *ShadowNode) Create(ctx context.Context, name string, flags uint32, mode
 		return nil, nil, 0, syscall.EACCES
 	}
 
-	// CRITICAL: Ensure parent directory has execute permissions for Git operations
-	// This is especially important for .git directory when git creates files inside it
-	// But only fix if we can access it (not for security tests)
+	// Ensure parent directory has execute permissions
 	if err := utils.EnsureDirPermissions(cachedDir); err != nil {
-
-		// Don't fail - try to continue, but this might cause issues
+		// Don't fail - try to continue
 	}
 
 	// Get source path to check permissions
@@ -647,6 +684,18 @@ func (n *ShadowNode) Create(ctx context.Context, name string, flags uint32, mode
 	if err != nil {
 
 		return nil, nil, 0, fs.ToErrno(err)
+	}
+
+	// CRITICAL: If O_TRUNC was requested in Create, mark file as independent immediately
+	// This ensures Write() won't do COW - user wants to overwrite
+	if flags&syscall.O_TRUNC != 0 {
+		cachePathForXattr := p
+		if !strings.HasPrefix(p, n.cachePath) {
+			cachePathForXattr = n.RebasePathUsingCache(p)
+		}
+		if n.xattrMgr != nil {
+			n.xattrMgr.SetCacheIndependent(cachePathForXattr)
+		}
 	}
 
 	utils.PreserveOwner(ctx, p)
@@ -684,13 +733,8 @@ func (n *ShadowNode) Create(ctx context.Context, name string, flags uint32, mode
 		n.HandleWriteActivity(p)
 	}
 
-	// CRITICAL: Debug Git object creation issue
-	if ch != nil {
-
-	}
-
 	// Invalidate parent directory cache to ensure kernel sees new file
-	n.NotifyContent(0, 0) // Invalidate entire directory content
+	n.NotifyContent(0, 0)
 
 	return ch, lf, 0, 0
 }
@@ -700,25 +744,20 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 
 	forceCache := flags&(syscall.O_WRONLY|syscall.O_RDWR|syscall.O_TRUNC|syscall.O_APPEND|syscall.O_CREAT) != 0
 	hasAppend := flags&syscall.O_APPEND != 0
+	hasTrunc := flags&syscall.O_TRUNC != 0
 	// Preserve O_APPEND flag - kernel handles append semantics correctly
-	// Only strip O_TRUNC to prevent truncation when we want to preserve content
+	// Strip O_TRUNC from flags passed to syscall.Open, but handle truncation manually if needed
 	flags = flags &^ syscall.O_TRUNC
-	Debug("Open: forceCache=%v, hasAppend=%v", forceCache, hasAppend)
 
 	perms := uint32(0)
 
-	// CRITICAL: Always verify that mirrorPath matches expected filename
-	// This handles cases where mirrorPath is stale after rename operations
+	// Verify that mirrorPath matches expected filename (handles stale mirrorPath after rename)
 	if n.mirrorPath != "" {
-		// Get the expected filename from the inode path
 		expectedFilename := filepath.Base(n.EmbeddedInode().Path(nil))
 		currentFilename := filepath.Base(n.mirrorPath)
-
 		if expectedFilename != currentFilename {
-			// Filenames don't match - mirrorPath is stale
-			Debug("Open: mirrorPath filename mismatch, expected %s, got %s", expectedFilename, currentFilename)
 			n.mirrorPath = ""
-			p = n.FullPath(true) // Recompute path
+			p = n.FullPath(true)
 		}
 	}
 
@@ -903,7 +942,59 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 		return nil, 0, fs.ToErrno(err)
 	}
 
+	// CRITICAL: If file was created in cache for write operations (not append, not trunc),
+	// mark it as independent immediately to prevent COW in Write()
+	// This handles os.WriteFile() which opens with WRONLY (no O_TRUNC) but wants to overwrite
+	if forceCache && !hasAppend && !hasTrunc && strings.HasPrefix(p, n.cachePath) {
+		if n.xattrMgr != nil {
+			n.xattrMgr.SetCacheIndependent(p)
+		}
+	}
+
+	// If O_TRUNC was requested, truncate the file now
+	// We do this after opening because we stripped O_TRUNC from flags
+	if hasTrunc && !hasAppend {
+		if err := syscall.Ftruncate(f, 0); err != nil {
+			syscall.Close(f)
+			return nil, 0, fs.ToErrno(err)
+		}
+		// CRITICAL: Also truncate the on-disk file to ensure Lstat() in Write() sees size=0
+		// Ftruncate() only truncates the file handle, but Lstat() reads from disk
+		// We need to sync or truncate the on-disk file to prevent COW from copying source content
+		if err := syscall.Fsync(f); err != nil {
+			// If fsync fails, continue anyway - truncation tracking will prevent COW
+		}
+		// CRITICAL: Mark file as independent immediately when O_TRUNC is used
+		// This ensures Write() won't do COW even if truncatedFiles path matching fails
+		// User wants to overwrite, so file should be independent from source
+		// CRITICAL: Use cache path for xattr operations (p might be mount point path)
+		cachePathForXattr := p
+		if !strings.HasPrefix(p, n.cachePath) {
+			cachePathForXattr = n.RebasePathUsingCache(p)
+		}
+		if n.xattrMgr != nil {
+			n.xattrMgr.SetCacheIndependent(cachePathForXattr)
+		}
+		// Track that this file was truncated to prevent COW in Write()
+		// Store both the cache path and the original path to ensure we can find it in Write()
+		if n.truncatedFiles == nil {
+			n.truncatedFiles = make(map[string]bool)
+		}
+		n.truncatedFiles[p] = true
+		// Also store cachePath if different from p (for Write() lookup)
+		if cachePath := n.RebasePathUsingCache(p); cachePath != p {
+			n.truncatedFiles[cachePath] = true
+		}
+		// Also store mount point path for Write() lookup
+		if mountPath := n.RebasePathUsingMountPoint(p); mountPath != p {
+			n.truncatedFiles[mountPath] = true
+		}
+	}
+
 	lf := fs.NewLoopbackFile(f)
+
+	// Initialize fuseFlags to 0 to prevent undefined behavior
+	fuseFlags = 0
 
 	// Set appropriate cache flags based on file access pattern
 	// For write operations, use direct I/O to prevent aggressive caching
@@ -927,19 +1018,22 @@ func (n *ShadowNode) Rename(ctx context.Context, name string, newParent fs.Inode
 		return syscall.EPERM
 	}
 
-	p2 := filepath.Join(n.RootData.Path, newParent.EmbeddedInode().Path(nil), newName)
+	// Resolve paths - use source paths (not cache paths) per Phase 2.1
+	sourcePath := filepath.Join(n.FullPath(false), name)
+	destPath := filepath.Join(n.RootData.Path, newParent.EmbeddedInode().Path(nil), newName)
 
-	// CRITICAL SECURITY FIX: Check if destination is an existing directory
-	// If renaming a file to match an existing directory name, move file INTO directory
+	// Handle destination being an existing directory (move file INTO directory)
 	if newParentNode, ok := newParent.(*ShadowNode); ok {
 		if destChild := newParentNode.GetChild(newName); destChild != nil {
 			if destOps := destChild.EmbeddedInode().Operations(); destOps != nil {
 				if destNode, ok := destOps.(*ShadowNode); ok {
-					// Check if destination is a directory by looking at its mirrorPath
 					if destNode.mirrorPath != "" {
-						if stat, err := os.Stat(destNode.mirrorPath); err == nil && stat.IsDir() {
-							// Destination is a directory, move file inside it
-							p2 = filepath.Join(p2, name)
+						var st syscall.Stat_t
+						if err := syscall.Lstat(destNode.mirrorPath, &st); err == nil {
+							if st.Mode&syscall.S_IFDIR != 0 {
+								// Destination is a directory, move file inside it
+								destPath = filepath.Join(destPath, name)
+							}
 						}
 					}
 				}
@@ -947,146 +1041,48 @@ func (n *ShadowNode) Rename(ctx context.Context, name string, newParent fs.Inode
 		}
 	}
 
-	// if p2 is in srcDir then change it to cache
-	if strings.HasPrefix(p2, n.srcDir) {
-		p2 = n.RebasePathUsingCache(p2)
+	// CRITICAL: Ensure parent directory exists BEFORE FUSE tries to look it up
+	// This implements Phase 2.3: Partial Cache Path Creation
+	// FUSE will look up the parent directory before calling Rename, so we must create it proactively
+	destDir := filepath.Dir(destPath)
+	if n.cacheMgr != nil {
+		if errno := n.cacheMgr.EnsurePath(destDir); errno != 0 {
+			return errno
+		}
 	}
 
-	p1 := filepath.Join(n.FullPath(false), name)
-	p1Cache := n.RebasePathUsingCache(p1)
+	// Handle RENAME_EXCHANGE using platform-specific implementation
+	if flags&fs.RENAME_EXCHANGE != 0 {
+		sourceCachePath := n.RebasePathUsingCache(sourcePath)
+		destCachePath := n.RebasePathUsingCache(destPath)
+		// Use rename operation's exchange method
+		if n.renameOp == nil {
+			n.renameOp = operations.NewRenameOperation(n.cacheMgr, n.srcDir, n.cachePath, n.renameTracker)
+		}
+		return n.renameOp.RenameExchange(sourceCachePath, destCachePath)
+	}
 
-	// check if file is in cache
-	p1attrXattr := xattr.XAttr{}
-	isp1InCache, errno := xattr.Get(p1Cache, &p1attrXattr)
+	// Use clean rename operation per Phase 2.1 constraints
+	if n.renameOp == nil {
+		n.renameOp = operations.NewRenameOperation(n.cacheMgr, n.srcDir, n.cachePath, n.renameTracker)
+	}
+
+	// Perform rename using operation module
+	errno := n.renameOp.Rename(sourcePath, destPath, flags, n.copyFileSimple)
 	if errno != 0 {
 		return errno
 	}
 
-	if xattr.IsPathDeleted(p1attrXattr) {
-		return syscall.ENOENT
-	}
-
-	p1attr := syscall.Stat_t{}
-
-	if isp1InCache {
-		err := syscall.Lstat(p1Cache, &p1attr)
-		if err != nil {
-			return fs.ToErrno(err)
-		}
-		if flags&fs.RENAME_EXCHANGE != 0 {
-			if errno := n.renameExchange(p1Cache, newParent, p2); errno != 0 {
-				return errno
+	// Update child node's mirrorPath after successful rename
+	if child := n.GetChild(name); child != nil {
+		if childOps := child.EmbeddedInode().Operations(); childOps != nil {
+			if childNode, ok := childOps.(*ShadowNode); ok {
+				childNode.mirrorPath = n.RebasePathUsingCache(destPath)
 			}
-		} else {
-			// move file from p1 to p2 using syscall
-			err := syscall.Rename(p1Cache, p2)
-			if err != nil {
-				return fs.ToErrno(err)
-			}
-			// CRITICAL SECURITY FIX: Update the actual file node's mirrorPath, not parent directory
-			// Find the child node being renamed and update its mirrorPath to the new location
-			if child := n.GetChild(name); child != nil {
-				if childOps := child.EmbeddedInode().Operations(); childOps != nil {
-					if childNode, ok := childOps.(*ShadowNode); ok {
-						childNode.mirrorPath = p2
-					}
-				}
-			}
-		}
-	} else {
-		// make a copy of the file at p2 destination
-		// ensure destination directory exists
-		_, err := cache.CreateMirroredDir(filepath.Dir(p2), n.cachePath, n.srcDir)
-		if err != nil {
-			return fs.ToErrno(err)
-		}
-		// open file for writing in p2
-		err = syscall.Lstat(p1, &p1attr)
-		if err != nil {
-			return fs.ToErrno(err)
-		}
-		f2, err := syscall.Open(p2, syscall.O_WRONLY|syscall.O_CREAT|syscall.O_TRUNC, uint32(p1attr.Mode))
-		if err != nil {
-			return fs.ToErrno(err)
-		}
-		defer syscall.Close(f2)
-		// open file for reading in p1
-		f1, err := syscall.Open(p1, syscall.O_RDONLY, 0)
-		if err != nil {
-			return fs.ToErrno(err)
-		}
-		defer syscall.Close(f1)
-
-		// copy file from p1 to p2 using buffer pool with partial write handling
-		bufPtr, ok := cache.GetBufferPool().Get().(*[]byte)
-		if !ok {
-			return syscall.ENOMEM
-		}
-		defer cache.GetBufferPool().Put(bufPtr)
-		buf := *bufPtr
-
-		for {
-			// Read data from the source file
-			n, err := syscall.Read(f1, buf)
-			if err != nil && err != syscall.EINTR && err != syscall.EAGAIN {
-				return fs.ToErrno(err)
-			}
-			if n == 0 {
-				break
-			}
-
-			// Write data to the destination file (handle partial writes)
-			offset := 0
-			for offset < n {
-				written, err := syscall.Write(f2, buf[offset:n])
-				if err != nil {
-					return fs.ToErrno(err)
-				}
-				offset += written
-			}
-		}
-
-		// Copy ownership and timestamps to destination
-		if err := syscall.Chown(p2, int(p1attr.Uid), int(p1attr.Gid)); err != nil {
-			return fs.ToErrno(err)
-		}
-
-		var times [2]syscall.Timespec
-		times[0] = syscall.Timespec{Sec: p1attr.Atim.Sec, Nsec: p1attr.Atim.Nsec}
-		times[1] = syscall.Timespec{Sec: p1attr.Mtim.Sec, Nsec: p1attr.Mtim.Nsec}
-		if err := syscall.UtimesNano(p2, times[:]); err != nil {
-			return fs.ToErrno(err)
 		}
 	}
 
-	// mark p1 as deleted
-	p1attrXattr.PathStatus = xattr.PathStatusDeleted
-	_, err := cache.CreateMirroredDir(filepath.Dir(p1Cache), n.cachePath, n.srcDir)
-	if err != nil {
-		return fs.ToErrno(err)
-	}
-
-	// create empty file using syscall.Open (handles existing files gracefully)
-	fd, err := syscall.Open(p1Cache, syscall.O_CREAT|syscall.O_WRONLY|syscall.O_TRUNC, uint32(p1attr.Mode))
-	if err != nil {
-		return fs.ToErrno(err)
-	}
-	syscall.Close(fd)
-
-	// Copy ownership and timestamps to shadow deletion marker
-	if err := syscall.Chown(p1Cache, int(p1attr.Uid), int(p1attr.Gid)); err != nil {
-		return fs.ToErrno(err)
-	}
-
-	var times [2]syscall.Timespec
-	times[0] = syscall.Timespec{Sec: p1attr.Atim.Sec, Nsec: p1attr.Atim.Nsec}
-	times[1] = syscall.Timespec{Sec: p1attr.Mtim.Sec, Nsec: p1attr.Mtim.Nsec}
-	if err := syscall.UtimesNano(p1Cache, times[:]); err != nil {
-		return fs.ToErrno(err)
-	}
-
-	// mark it as deleted
-	return xattr.Set(p1Cache, &p1attrXattr)
+	return 0
 }
 
 func (n *ShadowNode) RebasePathUsingCache(path string) string {
@@ -1121,8 +1117,6 @@ func (n *ShadowNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	}
 
 	p := filepath.Join(n.FullPath(false), name)
-	Debug("Unlink: %s", p)
-
 	mirrorPath := n.RebasePathUsingCache(p)
 
 	// check if file is already deleted in cache by reading xattr
@@ -1162,16 +1156,78 @@ func (n *ShadowNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	}
 
 	if errno == 0 {
-		// File exists in cache - unlink it directly
-		return fs.ToErrno(syscall.Unlink(mirrorPath))
+		// File exists in cache - mark as deleted with xattr before unlinking
+		// This ensures we can track deletion even after the file is removed
+		// Get original type from cache file
+		var st syscall.Stat_t
+		if err := syscall.Lstat(mirrorPath, &st); err != nil {
+			return fs.ToErrno(err)
+		}
+		originalType := uint32(st.Mode & syscall.S_IFMT)
+
+		// Mark as deleted with permanent independence
+		if n.deletion == nil {
+			n.deletion = operations.NewDeletion()
+		}
+		if errno := n.deletion.HandlePermanentIndependence(mirrorPath); errno != 0 {
+			return errno
+		}
+
+		// Update original type in xattr (preserving PathStatusDeleted and CacheIndependent)
+		attr := xattr.XAttr{}
+		if _, getErrno := xattr.Get(mirrorPath, &attr); getErrno == 0 {
+			attr.OriginalType = originalType
+			if attr.PathStatus != xattr.PathStatusDeleted {
+				attr.PathStatus = xattr.PathStatusDeleted
+			}
+			if !attr.CacheIndependent {
+				attr.CacheIndependent = true
+			}
+			xattr.Set(mirrorPath, &attr)
+		} else {
+			attr = xattr.XAttr{
+				PathStatus:       xattr.PathStatusDeleted,
+				OriginalType:     originalType,
+				CacheIndependent: true,
+			}
+			xattr.Set(mirrorPath, &attr)
+		}
+
+		// Now unlink the file (xattr persists even after file is removed on some filesystems,
+		// but we keep the deletion marker file to be safe)
+		// Actually, we should keep the deletion marker file, not unlink it!
+		// The deletion marker file with xattr is what we use to track deletion
+		// So we DON'T unlink it - we just mark it as deleted
+
+		// Get child inode number before removing it from tree for DeleteNotify
+		var childIno uint64
+		if child := n.GetChild(name); child != nil {
+			childIno = child.StableAttr().Ino
+		}
+
+		// Invalidate entry before removing child inode from tree
+		n.InvalidateEntry(ctx, name)
+
+		// Notify kernel that child inode is deleted
+		if childIno != 0 {
+			server := n.getServer()
+			if server != nil {
+				parentIno := n.EmbeddedInode().StableAttr().Ino
+				server.DeleteNotify(parentIno, childIno, name)
+			}
+		}
+
+		// Remove child inode from FUSE tree
+		n.RmChild(name)
+
+		return 0
 	}
 
-	// check if file is in srcDir
+	// Check if file is in source
 	var srcSt *syscall.Stat_t
 	if n.helpers != nil {
 		srcSt, errno = n.helpers.StatFile(p, false)
 	} else {
-		// Fallback to original method
 		srcSt = &syscall.Stat_t{}
 		err := syscall.Lstat(p, srcSt)
 		if err != nil {
@@ -1188,38 +1244,91 @@ func (n *ShadowNode) Unlink(ctx context.Context, name string) syscall.Errno {
 		return syscall.EISDIR
 	}
 
-	// if file is in srcDir create a new one in cache
-	deletedPath, err := n.CreateMirroredFileOrDir(p)
-	if err != nil {
-		// Handle race condition: if file already exists, verify it's valid
-		if errno := fs.ToErrno(err); errno == syscall.EEXIST {
-			// Another process may have created it - verify it exists
-			if n.helpers != nil {
-				_, checkErrno := n.helpers.StatFile(deletedPath, false)
-				if checkErrno != 0 {
-					return checkErrno
-				}
-			} else {
-				st := syscall.Stat_t{}
-				if syscall.Lstat(deletedPath, &st) != nil {
-					return fs.ToErrno(err)
-				}
-			}
-			// File exists, continue to set xattr
-		} else {
+	// Ensure parent directory exists in cache before creating deletion marker
+	// This implements Phase 2.3: Partial Cache Path Creation
+	if n.cacheMgr != nil {
+		parentDir := filepath.Dir(p)
+		if errno := n.cacheMgr.EnsurePath(parentDir); errno != 0 {
 			return errno
 		}
 	}
 
-	// set new xattr to indicate file is deleted
-	attr := xattr.XAttr{PathStatus: xattr.PathStatusDeleted}
-	errno = xattr.Set(deletedPath, &attr)
-	if errno != 0 {
+	// Use mirrorPath (already computed) to ensure consistency with isDeleted checks
+	// Create deletion marker file if it doesn't exist
+	var st syscall.Stat_t
+	if err := syscall.Lstat(mirrorPath, &st); err != nil {
+		if os.IsNotExist(err) {
+			// Create empty file as deletion marker
+			fd, err := syscall.Open(mirrorPath, syscall.O_CREAT|syscall.O_WRONLY|syscall.O_TRUNC, 0644)
+			if err != nil {
+				return fs.ToErrno(err)
+			}
+			syscall.Close(fd)
+		} else {
+			return fs.ToErrno(err)
+		}
+	}
+
+	// Use permanent independence operation per Phase 3.3
+	if n.deletion == nil {
+		n.deletion = operations.NewDeletion()
+	}
+	// Get original type from source
+	var originalType uint32 = syscall.S_IFREG
+	if srcSt != nil {
+		originalType = uint32(srcSt.Mode & syscall.S_IFMT)
+	}
+	// Mark as deleted with permanent independence
+	// Use mirrorPath to ensure consistency with isDeleted checks
+	if errno := n.deletion.HandlePermanentIndependence(mirrorPath); errno != 0 {
 		// Cleanup: if xattr setting failed, remove the shadow file we created
-		// (best effort - ignore cleanup errors)
-		syscall.Unlink(deletedPath)
+		syscall.Unlink(mirrorPath)
 		return errno
 	}
+	// Update original type in xattr (preserving PathStatusDeleted and CacheIndependent)
+	attr := xattr.XAttr{}
+	if _, getErrno := xattr.Get(mirrorPath, &attr); getErrno == 0 {
+		// Preserve PathStatus and CacheIndependent when updating OriginalType
+		attr.OriginalType = originalType
+		// Ensure PathStatusDeleted is still set
+		if attr.PathStatus != xattr.PathStatusDeleted {
+			attr.PathStatus = xattr.PathStatusDeleted
+		}
+		// Ensure CacheIndependent is still set (all deleted items are permanently independent)
+		if !attr.CacheIndependent {
+			attr.CacheIndependent = true
+		}
+		xattr.Set(mirrorPath, &attr)
+	} else {
+		// If xattr doesn't exist, set it with PathStatusDeleted, OriginalType, and CacheIndependent
+		attr = xattr.XAttr{
+			PathStatus:       xattr.PathStatusDeleted,
+			OriginalType:     originalType,
+			CacheIndependent: true, // All deleted items are permanently independent
+		}
+		xattr.Set(mirrorPath, &attr)
+	}
+
+	// Get child inode number before removing it from tree for DeleteNotify
+	var childIno uint64
+	if child := n.GetChild(name); child != nil {
+		childIno = child.StableAttr().Ino
+	}
+
+	// Invalidate entry before removing child inode from tree
+	n.InvalidateEntry(ctx, name)
+
+	// Notify kernel that child inode is deleted
+	if childIno != 0 {
+		server := n.getServer()
+		if server != nil {
+			parentIno := n.EmbeddedInode().StableAttr().Ino
+			server.DeleteNotify(parentIno, childIno, name)
+		}
+	}
+
+	// Remove child inode from FUSE tree
+	n.RmChild(name)
 
 	return 0
 }
@@ -1236,7 +1345,6 @@ func (n *ShadowNode) Symlink(ctx context.Context, target, name string, out *fuse
 	}
 
 	p := filepath.Join(n.FullPath(false), name)
-	Debug("Symlink:%s -> %s", p, target)
 
 	// change path to cache
 	p = n.RebasePathUsingCache(p)
@@ -1291,7 +1399,6 @@ func (n *ShadowNode) Link(ctx context.Context, target fs.InodeEmbedder, name str
 	}
 
 	p := filepath.Join(n.FullPath(false), name)
-	Debug("Link:%s -> %s", p, target.EmbeddedInode().Path(nil))
 
 	// get target path
 	targetOps := target.EmbeddedInode().Operations()
@@ -1353,15 +1460,27 @@ func newShadowNode(rootData *fs.LoopbackRoot, parent *fs.Inode, _ string, _ *sys
 			n.mountPoint = parentNode.mountPoint
 			n.srcDir = parentNode.srcDir
 			n.mountID = parentNode.mountID
-			// CRITICAL: Inherit git manager and activity tracker from parent
-			// This ensures all child nodes can track write activity for auto-commits
+			// Inherit git manager and activity tracker from parent
 			n.gitManager = parentNode.gitManager
 			n.activityTracker = parentNode.activityTracker
-			if n.gitManager != nil {
-				Debug("newShadowNode: Inherited git manager from parent")
-			}
-			if n.activityTracker != nil {
-				Debug("newShadowNode: Inherited activity tracker from parent")
+			// Inherit operation handlers from parent
+			n.cacheMgr = parentNode.cacheMgr
+			n.xattrMgr = parentNode.xattrMgr
+			n.renameOp = parentNode.renameOp
+			n.lookupOp = parentNode.lookupOp
+			n.directoryOp = parentNode.directoryOp
+			n.typeReplacement = parentNode.typeReplacement
+			n.deletion = parentNode.deletion
+			n.renameTracker = parentNode.renameTracker
+			// Inherit server reference from parent (for safe entry invalidation)
+			n.server = parentNode.server
+			// Inherit truncated files map from parent (for COW prevention)
+			n.truncatedFiles = parentNode.truncatedFiles
+			// Inherit helpers from parent
+			if parentNode.helpers != nil {
+				n.helpers = parentNode.helpers
+			} else {
+				n.helpers = NewShadowNodeHelpers(n)
 			}
 		}
 	}
@@ -1437,6 +1556,19 @@ func NewShadowRoot(inMountPoint, inSrcDir, cacheBaseDir string) (fs.InodeEmbedde
 
 	// Initialize helpers after all fields are set
 	root.helpers = NewShadowNodeHelpers(root)
+
+	// Initialize clean operation handlers
+	root.cacheMgr = cache.NewManager(cachePath, srcDir)
+	root.xattrMgr = xattr.NewManager()
+	root.renameTracker = operations.NewRenameTracker()
+	root.renameOp = operations.NewRenameOperation(root.cacheMgr, srcDir, cachePath, root.renameTracker)
+	root.lookupOp = operations.NewLookupOperation(root.cacheMgr, srcDir)
+	root.directoryOp = operations.NewDirectoryOperation(root.cacheMgr, srcDir, root.renameTracker)
+	root.typeReplacement = operations.NewTypeReplacement()
+	root.deletion = operations.NewDeletion()
+
+	// Initialize truncatedFiles map at root (shared across all nodes)
+	root.truncatedFiles = make(map[string]bool)
 
 	return root, nil
 }

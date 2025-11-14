@@ -51,3 +51,48 @@ func Remove(path string) syscall.Errno {
 	return fs.ToErrno(unix.Removexattr(path, Name))
 }
 
+// List lists all extended attribute names for a given path
+// This is the macOS-specific implementation using unix.Listxattr
+func List(path string) ([]string, syscall.Errno) {
+	// First, get the size needed
+	size, err := unix.Listxattr(path, nil)
+	if err != nil {
+		if err == unix.ENOATTR {
+			// No xattrs
+			return []string{}, 0
+		}
+		if os.IsNotExist(err) {
+			return nil, 0
+		}
+		return nil, fs.ToErrno(err)
+	}
+
+	if size == 0 {
+		return []string{}, 0
+	}
+
+	// Allocate buffer and get the actual list
+	buf := make([]byte, size)
+	n, err := unix.Listxattr(path, buf)
+	if err != nil {
+		return nil, fs.ToErrno(err)
+	}
+
+	// Parse null-separated list
+	var attrs []string
+	start := 0
+	for i := 0; i < n; i++ {
+		if buf[i] == 0 {
+			if start < i {
+				attrs = append(attrs, string(buf[start:i]))
+			}
+			start = i + 1
+		}
+	}
+	if start < n {
+		attrs = append(attrs, string(buf[start:n]))
+	}
+
+	return attrs, 0
+}
+

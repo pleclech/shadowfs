@@ -61,29 +61,128 @@ func (n *ShadowNode) CopyFileRange(ctx context.Context, fhIn fs.FileHandle, offI
 
 func (n *ShadowNode) Write(ctx context.Context, f fs.FileHandle, data []byte, off int64) (uint32, syscall.Errno) {
 	p := n.FullPath(true)
+	
+	// Resolve to cache path if needed (same logic as Open())
+	cachePath := p
+	if !strings.HasPrefix(p, n.cachePath) {
+		cachePath = n.RebasePathUsingCache(p)
+	} else {
+		cachePath = p
+	}
 
-	// Copy-on-write: if file is in cache but empty, and source exists, copy source content first
-	// Use Lstat() on path for copy-on-write check (path-based, no reflection overhead)
-	if strings.HasPrefix(p, n.cachePath) && off == 0 {
-		var cacheSt syscall.Stat_t
-		if err := syscall.Lstat(p, &cacheSt); err == nil && cacheSt.Size == 0 {
-			// Cache file is empty - check if source has content to copy
-			sourcePath := n.RebasePathUsingSrc(p)
-			var sourceSt syscall.Stat_t
-			if err := syscall.Lstat(sourcePath, &sourceSt); err == nil && sourceSt.Size > 0 {
-				// Source file exists and has content - copy it to cache before writing
-
-				if n.helpers != nil {
-					if errno := n.helpers.CopyFile(sourcePath, p); errno != 0 {
-						return 0, errno
+	// Copy-on-write: if file is in cache but not independent, and source exists, copy source content first
+	// Principle: If file exists in cache and is NOT independent (CacheIndependent = false) and also present in source,
+	// we must copy the whole content from source and make it independent BEFORE any write (regardless of offset)
+	// This is critical for patching files at non-zero offsets - we need the full source content first
+	// BUT: Skip COW if file was just truncated (O_TRUNC was used) - user wants to overwrite
+	// Lazy COW: we only copy when we need to write
+	if strings.HasPrefix(cachePath, n.cachePath) {
+		// CRITICAL: Check if this file was recently truncated FIRST
+		// If file was truncated, it's intentionally empty - NEVER do COW
+		// This prevents overwriting two different contents (e.g., "cache1" overwriting "source1" partially)
+		wasTruncated := false
+		if n.truncatedFiles != nil {
+			// Check multiple path variations to ensure we find the truncated file
+			// Try all possible path combinations since Open() and Write() might use different paths
+			wasTruncated = n.truncatedFiles[cachePath] || n.truncatedFiles[p]
+			if !wasTruncated {
+				// Try rebasing p to cache to see if it matches cachePath
+				rebasedCachePath := n.RebasePathUsingCache(p)
+				wasTruncated = n.truncatedFiles[rebasedCachePath]
+			}
+			if !wasTruncated {
+				// Try rebasing cachePath to mount point to see if it matches p
+				rebasedMountPath := n.RebasePathUsingMountPoint(cachePath)
+				wasTruncated = n.truncatedFiles[rebasedMountPath]
+			}
+			// Remove from map after first write (COW won't happen again)
+			if wasTruncated {
+				delete(n.truncatedFiles, cachePath)
+				delete(n.truncatedFiles, p)
+				rebasedCachePath := n.RebasePathUsingCache(p)
+				delete(n.truncatedFiles, rebasedCachePath)
+				rebasedMountPath := n.RebasePathUsingMountPoint(cachePath)
+				delete(n.truncatedFiles, rebasedMountPath)
+			}
+		}
+		
+		// CRITICAL: If file was truncated with O_TRUNC, NEVER do COW - user wants to overwrite
+		// A truncated file should remain empty until we write to it
+		if !wasTruncated {
+			// Check if file exists in cache (on disk)
+			var cacheSt syscall.Stat_t
+			fileExistsInCache := syscall.Lstat(cachePath, &cacheSt) == nil
+			
+			if fileExistsInCache {
+				// File exists in cache - check if it's independent
+				// If not independent and source exists, copy source content and make it independent
+				// CRITICAL: This must happen BEFORE any write, regardless of offset
+				// If user wants to patch at offset 5, we need the full source content (bytes 0-4) first
+				isIndependent := false
+				if n.xattrMgr != nil {
+					attr, exists, errno := n.xattrMgr.GetStatus(cachePath)
+					if errno == 0 {
+						// Check if file is independent (CacheIndependent = true)
+						isIndependent = exists && attr != nil && attr.CacheIndependent
 					}
-				} else {
-					if errno := n.copyFileSimple(sourcePath, p, sourceSt.Mode); errno != 0 {
-						return 0, errno
+				}
+				
+				if !isIndependent {
+					// File is not independent - check if source exists
+					sourcePath := n.RebasePathUsingSrc(cachePath)
+					var sourceSt syscall.Stat_t
+					if err := syscall.Lstat(sourcePath, &sourceSt); err == nil {
+						// Source file exists - copy it to cache before writing/appending/patching
+						// This is lazy COW: we only copy when we need to write
+						// Principle: If file is in cache and is not independent and is also present in source,
+						// we must copy the whole content from source and make it independent
+						// This ensures patching at non-zero offsets works correctly
+						if n.helpers != nil {
+							if errno := n.helpers.CopyFile(sourcePath, cachePath); errno != 0 {
+								return 0, errno
+							}
+						} else {
+							if errno := n.copyFileSimple(sourcePath, cachePath, uint32(sourceSt.Mode)); errno != 0 {
+								return 0, errno
+							}
+						}
+						// Once copied, file becomes independent of source
+						if n.xattrMgr != nil {
+							n.xattrMgr.SetCacheIndependent(cachePath)
+						}
+					}
+				}
+				// If file is already independent, no COW needed
+			} else {
+				// File doesn't exist in cache yet - this is first write/append/patch
+				// Check if source has content to copy (lazy COW on first write)
+				// Same principle: copy source content first, then write/append/patch
+				// CRITICAL: This ensures patching at non-zero offsets works correctly
+				sourcePath := n.RebasePathUsingSrc(cachePath)
+				var sourceSt syscall.Stat_t
+				if err := syscall.Lstat(sourcePath, &sourceSt); err == nil && sourceSt.Size > 0 {
+					// Source file exists and has content - copy it to cache before writing/appending/patching
+					// This is lazy COW: we only copy when we need to write
+					// Once copied, file becomes independent of source
+					if n.helpers != nil {
+						if errno := n.helpers.CopyFile(sourcePath, cachePath); errno != 0 {
+							return 0, errno
+						}
+					} else {
+						if errno := n.copyFileSimple(sourcePath, cachePath, sourceSt.Mode); errno != 0 {
+							return 0, errno
+						}
+					}
+					// Mark as independent after copying
+					if n.xattrMgr != nil {
+						if errno := n.xattrMgr.SetCacheIndependent(cachePath); errno != 0 {
+							// Log error but continue - COW already happened
+						}
 					}
 				}
 			}
 		}
+		// If wasTruncated is true, file was intentionally truncated with O_TRUNC - don't do COW
 	}
 
 	written, errno := func() (uint32, syscall.Errno) {

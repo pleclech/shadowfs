@@ -62,8 +62,13 @@ func FromBytes(data []byte) *XAttr {
 // - xattr_linux.go: Linux implementation using syscall.Removexattr
 // - xattr_other.go: Non-Linux stub implementation
 
+// List lists all extended attribute names for a given path
+// This is implemented in platform-specific files:
+// - xattr_linux.go: Linux implementation using syscall.Listxattr
+// - xattr_other.go: Non-Linux stub implementation
+
 func IsPathDeleted(attr XAttr) bool {
-	return attr.PathStatus&PathStatusDeleted != 0
+	return attr.PathStatus == PathStatusDeleted
 }
 
 // SetOriginalSourcePath sets the original source path for renamed directories

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -102,12 +103,12 @@ func main() {
 	if *daemon {
 		mountPoint := flag.Arg(0)
 		sourceDir := flag.Arg(1)
-		
+
 		// Check if mount point is already in use
 		if err := checkMountPointAvailable(mountPoint); err != nil {
 			log.Fatalf("Cannot start daemon: %v", err)
 		}
-		
+
 		if err := daemonize(mountPoint, sourceDir); err != nil {
 			log.Fatalf("Failed to daemonize: %v", err)
 		}
@@ -124,15 +125,16 @@ func main() {
 	isDaemonChild := os.Getenv("SHADOWFS_DAEMON") == "1"
 
 	// Initialize logger: Debug level if debug flag is set, Info level in daemon mode, otherwise default
+	logLevel := shadowfs.LogLevelFromString(os.Getenv("SHADOWFS_LOG_LEVEL"))
+
 	if *debug {
-		shadowfs.InitLogger(shadowfs.LogLevelDebug)
-	} else if isDaemonChild {
-		// In daemon mode, initialize logger at Info level so important messages are logged
-		shadowfs.InitLogger(shadowfs.LogLevelInfo)
+		logLevel = shadowfs.LogLevelDebug
 	}
 
+	shadowfs.InitLogger(logLevel)
+
 	mountPoint := flag.Arg(0)
-	
+
 	// Check if mount point is already mounted (for non-daemon mode)
 	if !*daemon {
 		isMounted, err := rootinit.IsMountPointActive(mountPoint)
@@ -140,19 +142,22 @@ func main() {
 			log.Fatalf("Mount point %s is already mounted", mountPoint)
 		}
 	}
-	
+
 	rootNode, err := shadowfs.NewShadowRoot(mountPoint, flag.Arg(1), cacheDirPath)
 	if err != nil {
 		log.Fatalf("NewShadowRoot error:\n%v", err)
 	}
 	root := rootNode.(*shadowfs.ShadowNode)
 
-	zeroDuration := time.Duration(0)
+	// Battle-tested mount options from rclone, restic, goofys, sioyek (2025)
+	// These timeouts prevent stale cached dentries without deadlock risk
+	entryTimeout := 500 * time.Millisecond    // Positive dentries
+	attrTimeout := 500 * time.Millisecond     // Attributes
+	negativeTimeout := 200 * time.Millisecond // Negative dentries (crucial for deleted files)
 	opts := &fs.Options{
-		// NullPermissions: true, // Leave file permissions on "000" files as-is
-		EntryTimeout:    &zeroDuration, // Disable entry caching
-		AttrTimeout:     &zeroDuration, // Disable attribute caching
-		NegativeTimeout: &zeroDuration, // Disable negative entry caching
+		EntryTimeout:    &entryTimeout,
+		AttrTimeout:     &attrTimeout,
+		NegativeTimeout: &negativeTimeout,
 	}
 	// Take full control of kernel caching to prevent permission issues
 	opts.MountOptions.ExplicitDataCacheControl = true
@@ -163,6 +168,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("Mount fail: %v\n", err)
 	}
+
+	// Set server reference in root node for safe entry invalidation (battle-tested approach)
+	// This allows all nodes to safely call server.EntryNotify/ NegativeEntryNotify
+	// without deadlock risk, even from inside Lookup, Unlink, Rename, etc.
+	root.SetServer(server)
 
 	// Initialize Git functionality after successful mount
 	if *autoGit {
@@ -248,11 +258,11 @@ func main() {
 }
 
 func printMainUsage(binaryName string) {
-	fmt.Printf(`%s - Shadow filesystem with automatic versioning
+	cmd := `{binaryname} - Shadow filesystem with automatic versioning
 
 Usage:
-  %s [flags] MOUNTPOINT SRCDIR    Mount shadow filesystem
-  %s <command> [options]          Run a command
+  {binaryname} [flags] MOUNTPOINT SRCDIR    Mount shadow filesystem
+  {binaryname} <command> [options]          Run a command
 
 Commands:
   version     Manage version history (list, diff, restore, log)
@@ -273,18 +283,20 @@ Flags for mount:
   -daemon                 Run as daemon in background
 
 Examples:
-  %s /mnt/shadow /home/user/source
-  %s -daemon /mnt/shadow /home/user/source
-  %s list
-  %s info --mount-point /mnt/shadow
-  %s stop --mount-point /mnt/shadow
-  %s version list --mount-point /mnt/shadow
-  %s checkpoint --mount-point /mnt/shadow
-  %s sync --mount-point /mnt/shadow --dry-run
-  %s backups list
+  {binaryname} /mnt/shadow /home/user/source
+  {binaryname} -daemon /mnt/shadow /home/user/source
+  {binaryname} list
+  {binaryname} info --mount-point /mnt/shadow
+  {binaryname} stop --mount-point /mnt/shadow
+  {binaryname} version list --mount-point /mnt/shadow
+  {binaryname} checkpoint --mount-point /mnt/shadow
+  {binaryname} sync --mount-point /mnt/shadow --dry-run
+  {binaryname} backups list
 
-Use "%s help <command>" for command-specific help.
-`, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName, binaryName)
+Use "{binaryname} help <command>" for command-specific help.
+`
+
+	fmt.Println(strings.ReplaceAll(cmd, "{binaryname}", binaryName))
 }
 
 func printSubcommandHelp(command string, binaryName string) {

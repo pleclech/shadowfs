@@ -7,7 +7,10 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func IndentMessage(level int, message string) string {
@@ -360,4 +363,290 @@ func ShouldBeRegularDirectory(path string, t *testing.T, levels ...int) {
 		FailFIndent(t, level, "directory %s should be a regular directory, but is a symlink", path)
 	}
 	SuccessFIndent(t, level, "")
+}
+
+func ShouldRemoveFile(path string, t *testing.T, levels ...int) {
+	t.Helper()
+	level := getLevel(levels...)
+	InfoFIndent(t, level, "file %s should be removed", path)
+
+	// Check if path exists before trying to remove
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		// File doesn't exist - that's fine, consider it already removed
+		SuccessFIndent(t, level, "file already removed")
+		return
+	}
+
+	if err := os.Remove(path); err != nil {
+		// If we get "transport endpoint is not connected", the filesystem was unmounted
+		// This is acceptable in test cleanup scenarios
+		if strings.Contains(err.Error(), "transport endpoint is not connected") {
+			InfoFIndent(t, level+1, "filesystem already unmounted, skipping removal")
+			SuccessFIndent(t, level, "")
+			return
+		}
+		FailFIndent(t, level, "failed to remove file: %v", err)
+	}
+	ShouldNotExist(path, t, level+1)
+	SuccessFIndent(t, level, "")
+}
+
+func ReadFileContent(path string, t *testing.T) string {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if err != nil {
+		Failf(t, "failed to read file %s: %v", path, err)
+	}
+	return string(content)
+}
+
+// ============================================================================
+// Filesystem Binary Management Utilities
+// ============================================================================
+
+// BinaryManager manages test binary lifecycle
+type BinaryManager struct {
+	binaryPath string
+	built      bool
+	mu         sync.Mutex
+	srcDir     string
+	mntDir     string
+	cacheDir   string
+}
+
+// NewBinaryManager creates a new binary manager
+func NewBinaryManager(t *testing.T, binaryPath string) *BinaryManager {
+	srcDir := filepath.Join(t.TempDir(), "src")
+	if err := os.MkdirAll(srcDir, 0755); err != nil {
+		t.Fatalf("Failed to create source directory %s: %v", srcDir, err)
+	}
+	mntDir := filepath.Join(t.TempDir(), "mnt")
+	if err := os.MkdirAll(mntDir, 0755); err != nil {
+		t.Fatalf("Failed to create mount directory %s: %v", mntDir, err)
+	}
+	cacheDir := filepath.Join(t.TempDir(), "cache")
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		t.Fatalf("Failed to create cache directory %s: %v", cacheDir, err)
+	}
+	return &BinaryManager{
+		binaryPath: binaryPath,
+		srcDir:     srcDir,
+		mntDir:     mntDir,
+		cacheDir:   cacheDir,
+	}
+}
+
+// SrcDir returns the source directory path
+func (bm *BinaryManager) SrcDir() string {
+	return bm.srcDir
+}
+
+// MntDir returns the mount directory path
+func (bm *BinaryManager) MntDir() string {
+	return bm.mntDir
+}
+
+// CacheDir returns the cache directory path
+func (bm *BinaryManager) CacheDir() string {
+	return bm.cacheDir
+}
+
+// BuildBinary builds the test binary
+func (bm *BinaryManager) BuildBinary() error {
+	bm.mu.Lock()
+	defer bm.mu.Unlock()
+
+	if bm.built {
+		return nil
+	}
+
+	// Remove existing binary if it exists
+	if _, err := os.Stat(bm.binaryPath); err == nil {
+		os.Remove(bm.binaryPath)
+	}
+
+	// Find project root by looking for go.mod
+	projectRoot := findProjectRoot()
+	if projectRoot == "" {
+		return fmt.Errorf("failed to find project root (looking for go.mod)")
+	}
+
+	cmdPath := filepath.Join(projectRoot, "cmd", "shadowfs")
+	cmd := exec.Command("go", "build", "-o", bm.binaryPath, cmdPath)
+	cmd.Dir = projectRoot
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to build binary: %w", err)
+	}
+
+	bm.built = true
+	return nil
+}
+
+// findProjectRoot finds the project root by looking for go.mod
+func findProjectRoot() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+
+	for {
+		goModPath := filepath.Join(dir, "go.mod")
+		if _, err := os.Stat(goModPath); err == nil {
+			return dir
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			// Reached filesystem root
+			break
+		}
+		dir = parent
+	}
+
+	return ""
+}
+
+// Cleanup removes the test binary
+func (bm *BinaryManager) Cleanup() {
+	bm.mu.Lock()
+	defer bm.mu.Unlock()
+
+	if bm.built {
+		os.Remove(bm.binaryPath)
+		bm.built = false
+	}
+}
+
+// testLogWriter wraps t.Logf to implement io.Writer
+type testLogWriter struct {
+	t      *testing.T
+	prefix string
+	buf    []byte
+}
+
+func (w *testLogWriter) Write(p []byte) (n int, err error) {
+	w.buf = append(w.buf, p...)
+	for {
+		idx := strings.IndexByte(string(w.buf), '\n')
+		if idx == -1 {
+			break
+		}
+		line := strings.TrimRight(string(w.buf[:idx]), "\r\n")
+		if line != "" {
+			w.t.Logf("%s%s", w.prefix, line)
+		}
+		w.buf = w.buf[idx+1:]
+	}
+	return len(p), nil
+}
+
+func (w *testLogWriter) Close() error {
+	if len(w.buf) > 0 {
+		line := strings.TrimRight(string(w.buf), "\r\n")
+		if line != "" {
+			w.t.Logf("%s%s", w.prefix, line)
+		}
+		w.buf = nil
+	}
+	return nil
+}
+
+// RunBinary runs the test binary with the given arguments
+// If cacheDir is provided, it will be passed as --cache-dir flag
+func (bm *BinaryManager) RunBinary(t *testing.T, mountPoint, srcDir string, cacheDir ...string) (*exec.Cmd, error) {
+	t.Helper()
+
+	if !bm.built {
+		if err := bm.BuildBinary(); err != nil {
+			return nil, err
+		}
+	}
+
+	args := []string{"--debug"}
+	if len(cacheDir) > 0 && cacheDir[0] != "" {
+		args = append(args, "--cache-dir", cacheDir[0])
+	}
+	args = append(args, mountPoint, srcDir)
+
+	cmd := exec.Command(bm.binaryPath, args...)
+
+	stdoutWriter := &testLogWriter{t: t, prefix: "[stdout] "}
+	stderrWriter := &testLogWriter{t: t, prefix: "[stderr] "}
+	cmd.Stdout = stdoutWriter
+	cmd.Stderr = stderrWriter
+
+	return cmd, cmd.Start()
+}
+
+// GracefulShutdown gracefully shuts down a process and unmounts the mount point
+func GracefulShutdown(cmd *exec.Cmd, mountPoint string, t *testing.T) {
+	t.Helper()
+
+	if cmd.Process != nil {
+		cmd.Process.Signal(syscall.SIGTERM)
+		done := make(chan error, 1)
+		go func() {
+			done <- cmd.Wait()
+		}()
+
+		select {
+		case <-time.After(5 * time.Second):
+			if cmd.Process != nil {
+				cmd.Process.Kill()
+				cmd.Wait()
+			}
+		case err := <-done:
+			if err != nil {
+				t.Logf("Process exited with error: %v", err)
+			}
+		}
+	}
+
+	// Unmount after process exits
+	exec.Command("umount", mountPoint).Run()
+}
+
+// SetupTestMain sets up TestMain with binary management
+// Returns a function to call in TestMain's defer
+// Note: This creates a temporary testing.T for setup, which is acceptable for TestMain
+func SetupTestMain(m *testing.M, binaryPath string, logLevel string) func() {
+	// Create a temporary test context for setup
+	// We can't use *testing.T in TestMain, so we'll create directories manually
+	tempDir, err := os.MkdirTemp("", "shadowfs-test-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to create temp directory: %v\n", err)
+		os.Exit(1)
+	}
+
+	srcDir := filepath.Join(tempDir, "src")
+	if err := os.MkdirAll(srcDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to create source directory: %v\n", err)
+		os.Exit(1)
+	}
+	mntDir := filepath.Join(tempDir, "mnt")
+	if err := os.MkdirAll(mntDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to create mount directory: %v\n", err)
+		os.Exit(1)
+	}
+
+	bm := &BinaryManager{
+		binaryPath: binaryPath,
+		srcDir:     srcDir,
+		mntDir:     mntDir,
+		cacheDir:   filepath.Join(tempDir, "cache"),
+	}
+
+	os.Setenv("SHADOWFS_LOG_LEVEL", logLevel)
+
+	if err := bm.BuildBinary(); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to build binary: %v\n", err)
+		os.Exit(1)
+	}
+
+	return func() {
+		bm.Cleanup()
+		os.RemoveAll(tempDir)
+	}
 }

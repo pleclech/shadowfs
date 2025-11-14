@@ -8,6 +8,7 @@ package fs
 // license that can be found in the LICENSE file.
 
 import (
+	"context"
 	"path/filepath"
 	"sync"
 	"syscall"
@@ -52,7 +53,12 @@ func NewShadowDirStream(root *ShadowNode, originPath string) (fs.DirStream, sysc
 	}
 
 	cachePath := root.RebasePathUsingCache(originPath)
+	return NewShadowDirStreamWithPaths(root, cachePath, originPath)
+}
 
+// NewShadowDirStreamWithPaths creates a DirStream with explicit cache and source paths
+// This is used by directoryOp.Readdir to pass resolved paths (for renamed directories)
+func NewShadowDirStreamWithPaths(root *ShadowNode, cachePath, sourcePath string) (fs.DirStream, syscall.Errno) {
 	// check if the directory is not deleted in cache
 	attr := xattr.XAttr{}
 	xattr.Get(cachePath, &attr)
@@ -65,8 +71,8 @@ func NewShadowDirStream(root *ShadowNode, originPath string) (fs.DirStream, sysc
 		buf:        make([]byte, 4096),
 		fd:         -1,
 		root:       root,
-		originPath: originPath,
-		cachePath:  cachePath,
+		originPath: sourcePath, // Use resolved source path (may be original path for renamed dirs)
+		cachePath:  cachePath,  // Use provided cache path
 		seen:       make(map[string]struct{}),
 	}
 
@@ -165,17 +171,30 @@ func (ds *ShadowDirStream) processCacheEntries() bool {
 			return false
 		}
 
+		// Handle . and .. entries with deduplication
 		if next.Name == "." || next.Name == ".." {
-			ds.nextDirEntry = &next
-			return true
+			if _, seen := ds.seen[next.Name]; !seen {
+				ds.seen[next.Name] = struct{}{}
+				ds.nextDirEntry = &next
+				return true
+			}
+			// Skip duplicate . or .. entries
+			continue
 		}
 
+		// Check if deleted BEFORE adding to seen
+		// Cache priority: deleted entries in cache override source entries
+		if ds.isDeleted(next.Name) {
+			// Mark as seen so source entry is also skipped
+			ds.seen[next.Name] = struct{}{}
+			// Skip deleted entries from cache
+			continue
+		}
+
+		// Not deleted - add to seen and return
 		ds.seen[next.Name] = struct{}{}
-
-		if !ds.isDeleted(next.Name) {
-			ds.nextDirEntry = &next
-			return true
-		}
+		ds.nextDirEntry = &next
+		return true
 	}
 	return false
 }
@@ -198,12 +217,26 @@ func (ds *ShadowDirStream) processOriginEntries() bool {
 			return false
 		}
 
+		// Handle . and .. entries with deduplication
 		if next.Name == "." || next.Name == ".." {
-			ds.nextDirEntry = &next
-			return true
+			if _, seen := ds.seen[next.Name]; !seen {
+				ds.seen[next.Name] = struct{}{}
+				ds.nextDirEntry = &next
+				return true
+			}
+			// Skip duplicate . or .. entries
+			continue
+		}
+
+		// Check if this source entry is marked as deleted in cache
+		// Cache priority: if deleted in cache, don't show from source
+		if ds.isDeleted(next.Name) {
+			// Skip deleted entries from source
+			continue
 		}
 
 		if _, seen := ds.seen[next.Name]; !seen {
+			ds.seen[next.Name] = struct{}{}
 			ds.nextDirEntry = &next
 			return true
 		}
@@ -213,9 +246,42 @@ func (ds *ShadowDirStream) processOriginEntries() bool {
 // isDeleted checks if a file/directory is marked as deleted in cache
 func (ds *ShadowDirStream) isDeleted(name string) bool {
 	fullPath := filepath.Join(ds.cachePath, name)
+	
+	// List all xattrs to check if our xattr exists
+	allAttrs, listErrno := xattr.List(fullPath)
+	
+	// Check if our xattr name is in the list
+	hasShadowXattr := false
+	if listErrno == 0 {
+		for _, attrName := range allAttrs {
+			if attrName == xattr.Name {
+				hasShadowXattr = true
+				break
+			}
+		}
+	}
+	
+	// If we have the xattr in the list, try to read it
+	if hasShadowXattr {
+		attr := xattr.XAttr{}
+		exists, errno := xattr.Get(fullPath, &attr)
+		if errno == 0 && exists {
+			return xattr.IsPathDeleted(attr)
+		}
+	}
+	
+	// Fallback to normal check
 	attr := xattr.XAttr{}
 	exists, errno := xattr.Get(fullPath, &attr)
-	return errno == 0 && exists && xattr.IsPathDeleted(attr)
+	// If xattr exists and is marked as deleted, return true
+	if errno == 0 && exists {
+		return xattr.IsPathDeleted(attr)
+	}
+	
+	// If there's an error reading xattr (file doesn't exist or xattr doesn't exist), it's not deleted
+	// Note: We check xattr even if file doesn't exist physically, because deletion markers
+	// are files with xattr. If the file doesn't exist and has no xattr, it's not deleted.
+	return false
 }
 
 // Like syscall.Dirent, but without the [256]byte name.
@@ -313,9 +379,49 @@ func (ds *ShadowDirStream) Next() (fuse.DirEntry, syscall.Errno) {
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
 
-	entry, errno := ds.next()
+	// Check if we already have a pending entry
+	if ds.nextDirEntry != nil {
+		e := *ds.nextDirEntry
+		ds.nextDirEntry = nil
+		return e, fs.OK
+	}
 
-	return entry, errno
+	// Process cache entries first
+	if ds.step == stepCache {
+		if ds.processCacheEntries() {
+			if ds.nextDirEntry != nil {
+				e := *ds.nextDirEntry
+				ds.nextDirEntry = nil
+				return e, fs.OK
+			}
+		}
+		// Switch to origin step when cache is exhausted
+		ds.originStep()
+	}
+
+	// Process origin entries
+	if ds.processOriginEntries() {
+		if ds.nextDirEntry != nil {
+			e := *ds.nextDirEntry
+			ds.nextDirEntry = nil
+			return e, fs.OK
+		}
+	}
+
+	return fuse.DirEntry{}, fs.OK
+}
+
+// Readdirent is called by go-fuse for READDIRPLUS operations
+// It calls HasNext() and Next() internally
+func (ds *ShadowDirStream) Readdirent(ctx context.Context) (*fuse.DirEntry, syscall.Errno) {
+	if !ds.HasNext() {
+		return nil, 0
+	}
+	de, errno := ds.Next()
+	if errno != 0 {
+		return nil, errno
+	}
+	return &de, errno
 }
 
 func (ds *ShadowDirStream) load() syscall.Errno {
