@@ -1538,11 +1538,14 @@ sudo ./shadowfs <mountpoint> <srcdir>
 - `-auto-git`: Enable automatic Git versioning
 - `-git-idle-timeout`: Idle timeout before commit (e.g., `30s`, `1m`, `2m30s`, default: `30s`)
 - `-git-safety-window`: Safety window delay after last write before committing (e.g., `5s`, `10s`, default: `5s`)
-- `-debug`: Enable FUSE debug output
+- `-debug`: Enable ShadowFS debug logging (filesystem-specific debug output)
+- `-debug-fuse`: Enable FUSE library debug output (low-level FUSE operation logging)
 - `-cache-dir`: Custom cache directory (default: `~/.shadowfs`, or `$SHADOWFS_CACHE_DIR` environment variable)
 
 **Environment Variables:**
 - `SHADOWFS_CACHE_DIR`: Base directory for cache storage (overridden by `-cache-dir` flag)
+- `SHADOWFS_LOG_LEVEL`: Set logging level (`debug`, `info`, `warn`, `error`, default: `info`)
+- `SHADOWFS_DEBUG_FUSE`: Enable FUSE debug output (set to `1` to enable, equivalent to `-debug-fuse` flag)
 - `HOME`: User home directory (for default cache location)
 - `TMPDIR`: Temporary directory location
 
@@ -1727,8 +1730,14 @@ sudo modprobe fuse
 #### Performance Issues
 
 ```bash
-# Use debug mode to identify bottlenecks
+# Use debug mode to identify bottlenecks (ShadowFS logging)
 sudo ./shadowfs -debug /mount /source
+
+# Enable FUSE debug output (low-level FUSE operations)
+sudo ./shadowfs -debug-fuse /mount /source
+
+# Or use environment variable
+SHADOWFS_DEBUG_FUSE=1 sudo ./shadowfs /mount /source
 
 # Monitor cache size
 du -sh ~/.shadowfs/
@@ -1807,15 +1816,27 @@ sudo ./shadowfs /mount /source
 Enable detailed logging:
 
 ```bash
-# Enable FUSE debug output
+# Enable ShadowFS debug logging (filesystem-specific)
 sudo ./shadowfs -debug /mount /source
 
-# Enable filesystem logging
-export SHADOWFS_DEBUG=1
-sudo ./shadowfs /mount /source
+# Enable FUSE library debug output (low-level FUSE operations)
+sudo ./shadowfs -debug-fuse /mount /source
+
+# Enable both ShadowFS and FUSE debug output
+sudo ./shadowfs -debug -debug-fuse /mount /source
+
+# Enable FUSE debug via environment variable
+SHADOWFS_DEBUG_FUSE=1 sudo ./shadowfs /mount /source
+
+# Set custom log level
+SHADOWFS_LOG_LEVEL=debug sudo ./shadowfs /mount /source
 ```
 
-**Note**: The `-debug` flag enables FUSE debug output. For filesystem-specific debug logging, use the `SHADOWFS_DEBUG` environment variable.
+**Note**: 
+- The `-debug` flag enables ShadowFS's own debug logging (filesystem operations, path resolution, etc.)
+- The `-debug-fuse` flag enables the go-fuse library's internal debug output (low-level FUSE operations like GETXATTR, LOOKUP, etc.)
+- You can use both flags together for comprehensive debugging
+- The `SHADOWFS_DEBUG_FUSE` environment variable can be used instead of the `-debug-fuse` flag
 
 ## Contributing
 

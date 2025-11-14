@@ -280,7 +280,8 @@ Commands:
   help        Show help for a command
 
 Flags for mount:
-  -debug                  Print debug data
+  -debug                  Print ShadowFS debug data (filesystem-specific logging)
+  -debug-fuse             Print FUSE debug data (low-level FUSE operation logging)
   -auto-git               Enable automatic Git versioning
   -git-idle-timeout       Idle timeout for auto-commits (default: 30s)
   -git-safety-window      Safety window delay after last write before committing (default: 5s)
