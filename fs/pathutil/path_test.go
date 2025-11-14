@@ -2,6 +2,8 @@ package pathutil
 
 import (
 	"testing"
+
+	tu "github.com/pleclech/shadowfs/fs/utils/testings"
 )
 
 func TestRebaseToCache(t *testing.T) {
@@ -39,7 +41,8 @@ func TestRebaseToCache(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := RebaseToCache(tt.path, tt.cachePath, tt.srcDir)
 			if result != tt.expected {
-				t.Errorf("RebaseToCache(%s, %s, %s) = %s, expected %s", tt.path, tt.cachePath, tt.srcDir, result, tt.expected)
+				tu.Failf(
+					t, "RebaseToCache(%s, %s, %s) = %s, expected %s", tt.path, tt.cachePath, tt.srcDir, result, tt.expected)
 			}
 		})
 	}
@@ -80,7 +83,8 @@ func TestRebaseToMountPoint(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := RebaseToMountPoint(tt.path, tt.mountPoint, tt.cachePath)
 			if result != tt.expected {
-				t.Errorf("RebaseToMountPoint(%s, %s, %s) = %s, expected %s", tt.path, tt.mountPoint, tt.cachePath, result, tt.expected)
+				tu.Failf(
+					t, "RebaseToMountPoint(%s, %s, %s) = %s, expected %s", tt.path, tt.mountPoint, tt.cachePath, result, tt.expected)
 			}
 		})
 	}
@@ -88,11 +92,11 @@ func TestRebaseToMountPoint(t *testing.T) {
 
 func TestRebaseToSource(t *testing.T) {
 	tests := []struct {
-		name     string
-		path     string
-		srcDir   string
+		name      string
+		path      string
+		srcDir    string
 		cachePath string
-		expected string
+		expected  string
 	}{
 		{
 			name:      "simple file",
@@ -121,9 +125,9 @@ func TestRebaseToSource(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := RebaseToSource(tt.path, tt.srcDir, tt.cachePath)
 			if result != tt.expected {
-				t.Errorf("RebaseToSource(%s, %s, %s) = %s, expected %s", tt.path, tt.srcDir, tt.cachePath, result, tt.expected)
+				tu.Failf(
+					t, "RebaseToSource(%s, %s, %s) = %s, expected %s", tt.path, tt.srcDir, tt.cachePath, result, tt.expected)
 			}
 		})
 	}
 }
-

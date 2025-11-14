@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	tu "github.com/pleclech/shadowfs/fs/utils/testings"
 )
 
 func TestGitManager_IsGitAvailable(t *testing.T) {
@@ -21,7 +23,7 @@ func TestGitManager_InitializeRepo(t *testing.T) {
 	// Create temporary directory
 	tempDir, err := os.MkdirTemp("", "git-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -32,28 +34,21 @@ func TestGitManager_InitializeRepo(t *testing.T) {
 	// Test initialization
 	err = gm.InitializeRepo()
 	if err != nil {
-		t.Errorf("InitializeRepo failed: %v", err)
+		tu.Failf(t, "InitializeRepo failed: %v", err)
 	}
 
 	// Check if .gitofs/.git directory was created (git init creates .gitofs/.git/)
 	gitDir := filepath.Join(tempDir, ".gitofs", ".git")
 	if stat, err := os.Stat(gitDir); err != nil || !stat.IsDir() {
-		t.Errorf("Git repository not created properly: %v", err)
+		tu.Failf(t, "Git repository not created properly: %v", err)
 	}
-
-	// remove we don't want to overwrite an existing .gitignore in source dir
-	// Check if .gitignore was created
-	// gitIgnorePath := filepath.Join(tempDir, ".gitignore")
-	// if _, err := os.Stat(gitIgnorePath); err != nil {
-	// 	t.Errorf(".gitignore not created")
-	// }
 }
 
 func TestGitManager_AutoCommitFile(t *testing.T) {
 	// Create temporary directory
 	tempDir, err := os.MkdirTemp("", "git-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -73,20 +68,20 @@ func TestGitManager_AutoCommitFile(t *testing.T) {
 	content := []byte("test content")
 	err = os.WriteFile(testFile, content, 0644)
 	if err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
+		tu.Failf(t, "Failed to create test file: %v", err)
 	}
 
 	// Test auto-commit
 	err = gm.AutoCommitFile(testFile, "test commit")
 	if err != nil {
-		t.Errorf("AutoCommitFile failed: %v", err)
+		tu.Failf(t, "AutoCommitFile failed: %v", err)
 	}
 }
 
 func TestGitManager_DisabledMode(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "git-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -97,20 +92,20 @@ func TestGitManager_DisabledMode(t *testing.T) {
 	// Should not fail even when disabled
 	err = gm.InitializeRepo()
 	if err != nil {
-		t.Errorf("InitializeRepo failed in disabled mode: %v", err)
+		tu.Failf(t, "InitializeRepo failed in disabled mode: %v", err)
 	}
 
 	// Should not create .git when disabled
 	gitDir := filepath.Join(tempDir, ".git")
 	if _, err := os.Stat(gitDir); err == nil {
-		t.Errorf("Git repository should not be created when disabled")
+		tu.Failf(t, "Git repository should not be created when disabled")
 	}
 }
 
 func TestActivityTracker_MarkActivity(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "activity-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -134,14 +129,14 @@ func TestActivityTracker_MarkActivity(t *testing.T) {
 	// Check if file is marked as active
 	activeFiles := at.GetActiveFiles()
 	if len(activeFiles) != 1 || activeFiles[0] != testFile {
-		t.Errorf("Expected 1 active file, got %d: %v", len(activeFiles), activeFiles)
+		tu.Failf(t, "Expected 1 active file, got %d: %v", len(activeFiles), activeFiles)
 	}
 }
 
 func TestActivityTracker_IdleDetection(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "activity-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -167,14 +162,14 @@ func TestActivityTracker_IdleDetection(t *testing.T) {
 
 	// Check if file is considered idle
 	if !at.IsIdle(testFile) {
-		t.Errorf("File should be considered idle after timeout")
+		tu.Failf(t, "File should be considered idle after timeout")
 	}
 }
 
 func TestGitManager_StatusPorcelain(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "git-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -194,18 +189,18 @@ func TestGitManager_StatusPorcelain(t *testing.T) {
 	content := []byte("test content")
 	err = os.WriteFile(testFile, content, 0644)
 	if err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
+		tu.Failf(t, "Failed to create test file: %v", err)
 	}
 
 	// Test StatusPorcelain - should return the changed file
 	changedFiles, err := gm.StatusPorcelain()
 	if err != nil {
-		t.Errorf("StatusPorcelain failed: %v", err)
+		tu.Failf(t, "StatusPorcelain failed: %v", err)
 	}
 
 	// Should have at least one changed file (test.txt)
 	if len(changedFiles) == 0 {
-		t.Error("Expected at least one changed file, got none")
+		tu.Failf(t, "Expected at least one changed file, got none")
 	}
 
 	// Check if test.txt is in the list
@@ -217,14 +212,14 @@ func TestGitManager_StatusPorcelain(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("Expected test.txt in changed files, got: %v", changedFiles)
+		tu.Failf(t, "Expected test.txt in changed files, got: %v", changedFiles)
 	}
 }
 
 func TestGitManager_ValidateCommitHash(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "git-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -244,7 +239,7 @@ func TestGitManager_ValidateCommitHash(t *testing.T) {
 	content := []byte("test content")
 	err = os.WriteFile(testFile, content, 0644)
 	if err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
+		tu.Failf(t, "Failed to create test file: %v", err)
 	}
 
 	// Commit the file
@@ -258,20 +253,20 @@ func TestGitManager_ValidateCommitHash(t *testing.T) {
 	// We'll use a simple approach: validate HEAD exists
 	err = gm.ValidateCommitHash("HEAD")
 	if err != nil {
-		t.Errorf("ValidateCommitHash(HEAD) failed: %v", err)
+		tu.Failf(t, "ValidateCommitHash(HEAD) failed: %v", err)
 	}
 
 	// Test with invalid hash
 	err = gm.ValidateCommitHash("0000000000000000000000000000000000000000")
 	if err == nil {
-		t.Error("ValidateCommitHash should fail for invalid hash")
+		tu.Failf(t, "ValidateCommitHash should fail for invalid hash")
 	}
 }
 
 func TestGitManager_Log(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "git-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -291,7 +286,7 @@ func TestGitManager_Log(t *testing.T) {
 	content := []byte("test content")
 	err = os.WriteFile(testFile, content, 0644)
 	if err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
+		tu.Failf(t, "Failed to create test file: %v", err)
 	}
 
 	// Commit the file
@@ -306,18 +301,18 @@ func TestGitManager_Log(t *testing.T) {
 	options := LogOptions{Oneline: true, Limit: 1}
 	err = gm.Log(options, &output)
 	if err != nil {
-		t.Errorf("Log failed: %v", err)
+		tu.Failf(t, "Log failed: %v", err)
 	}
 
 	if output.Len() == 0 {
-		t.Error("Log output should not be empty")
+		tu.Failf(t, "Log output should not be empty")
 	}
 }
 
 func TestGitManager_Diff(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "git-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -337,7 +332,7 @@ func TestGitManager_Diff(t *testing.T) {
 	content := []byte("test content")
 	err = os.WriteFile(testFile, content, 0644)
 	if err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
+		tu.Failf(t, "Failed to create test file: %v", err)
 	}
 
 	// Commit the file
@@ -350,7 +345,7 @@ func TestGitManager_Diff(t *testing.T) {
 	// Modify the file
 	err = os.WriteFile(testFile, []byte("modified content"), 0644)
 	if err != nil {
-		t.Fatalf("Failed to modify test file: %v", err)
+		tu.Failf(t, "Failed to modify test file: %v", err)
 	}
 
 	// Test Diff
@@ -358,18 +353,18 @@ func TestGitManager_Diff(t *testing.T) {
 	options := DiffOptions{Stat: false, CommitArgs: []string{"HEAD"}, Paths: []string{"test.txt"}}
 	err = gm.Diff(options, &output)
 	if err != nil {
-		t.Errorf("Diff failed: %v", err)
+		tu.Failf(t, "Diff failed: %v", err)
 	}
 
 	if output.Len() == 0 {
-		t.Error("Diff output should not be empty for modified file")
+		tu.Failf(t, "Diff output should not be empty for modified file")
 	}
 }
 
 func TestGitManager_Checkout(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "git-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -389,7 +384,7 @@ func TestGitManager_Checkout(t *testing.T) {
 	content := []byte("original content")
 	err = os.WriteFile(testFile, content, 0644)
 	if err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
+		tu.Failf(t, "Failed to create test file: %v", err)
 	}
 
 	// Commit the file
@@ -402,23 +397,23 @@ func TestGitManager_Checkout(t *testing.T) {
 	// Modify the file
 	err = os.WriteFile(testFile, []byte("modified content"), 0644)
 	if err != nil {
-		t.Fatalf("Failed to modify test file: %v", err)
+		tu.Failf(t, "Failed to modify test file: %v", err)
 	}
 
 	// Test Checkout to restore from HEAD
 	var stdout, stderr strings.Builder
 	err = gm.Checkout("HEAD", []string{"test.txt"}, false, &stdout, &stderr)
 	if err != nil {
-		t.Errorf("Checkout failed: %v", err)
+		tu.Failf(t, "Checkout failed: %v", err)
 	}
 
 	// Verify file was restored
 	restoredContent, err := os.ReadFile(testFile)
 	if err != nil {
-		t.Fatalf("Failed to read restored file: %v", err)
+		tu.Failf(t, "Failed to read restored file: %v", err)
 	}
 
 	if string(restoredContent) != "original content" {
-		t.Errorf("Expected 'original content', got '%s'", string(restoredContent))
+		tu.Failf(t, "Expected 'original content', got '%s'", string(restoredContent))
 	}
 }

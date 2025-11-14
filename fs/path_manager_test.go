@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	tu "github.com/pleclech/shadowfs/fs/utils/testings"
 )
 
 func TestNewPathManager(t *testing.T) {
@@ -13,15 +15,15 @@ func TestNewPathManager(t *testing.T) {
 	pm := NewPathManager(sourceRoot, cacheRoot)
 
 	if pm == nil {
-		t.Fatal("NewPathManager() returned nil")
+		tu.Failf(t, "NewPathManager() returned nil")
 	}
 
 	if pm.GetSourceRoot() != sourceRoot {
-		t.Errorf("Expected source root %s, got %s", sourceRoot, pm.GetSourceRoot())
+		tu.Failf(t, "Expected source root %s, got %s", sourceRoot, pm.GetSourceRoot())
 	}
 
 	if pm.GetCacheRoot() != cacheRoot {
-		t.Errorf("Expected cache root %s, got %s", cacheRoot, pm.GetCacheRoot())
+		tu.Failf(t, "Expected cache root %s, got %s", cacheRoot, pm.GetCacheRoot())
 	}
 }
 
@@ -64,7 +66,7 @@ func TestPathManager_RebaseToCache(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := pm.RebaseToCache(tt.path)
 			if result != tt.expected {
-				t.Errorf("RebaseToCache(%s) = %s, expected %s", tt.path, result, tt.expected)
+				tu.Failf(t, "RebaseToCache(%s) = %s, expected %s", tt.path, result, tt.expected)
 			}
 		})
 	}
@@ -109,7 +111,7 @@ func TestPathManager_RebaseToSource(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := pm.RebaseToSource(tt.path)
 			if result != tt.expected {
-				t.Errorf("RebaseToSource(%s) = %s, expected %s", tt.path, result, tt.expected)
+				tu.Failf(t, "RebaseToSource(%s) = %s, expected %s", tt.path, result, tt.expected)
 			}
 		})
 	}
@@ -133,7 +135,7 @@ func TestPathManager_IsCachePath(t *testing.T) {
 		t.Run(tt.path, func(t *testing.T) {
 			result := pm.IsCachePath(tt.path)
 			if result != tt.expected {
-				t.Errorf("IsCachePath(%s) = %v, expected %v", tt.path, result, tt.expected)
+				tu.Failf(t, "IsCachePath(%s) = %v, expected %v", tt.path, result, tt.expected)
 			}
 		})
 	}
@@ -157,7 +159,7 @@ func TestPathManager_IsSourcePath(t *testing.T) {
 		t.Run(tt.path, func(t *testing.T) {
 			result := pm.IsSourcePath(tt.path)
 			if result != tt.expected {
-				t.Errorf("IsSourcePath(%s) = %v, expected %v", tt.path, result, tt.expected)
+				tu.Failf(t, "IsSourcePath(%s) = %v, expected %v", tt.path, result, tt.expected)
 			}
 		})
 	}
@@ -202,7 +204,7 @@ func TestPathManager_FullPath(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := pm.FullPath(tt.path, tt.useCache)
 			if result != tt.expected {
-				t.Errorf("FullPath(%s, %v) = %s, expected %s", tt.path, tt.useCache, result, tt.expected)
+				tu.Failf(t, "FullPath(%s, %v) = %s, expected %s", tt.path, tt.useCache, result, tt.expected)
 			}
 		})
 	}
@@ -218,7 +220,7 @@ func TestPathManager_ClearCache(t *testing.T) {
 	// Verify cache has entries
 	size, _, _ := pm.GetCacheStats()
 	if size == 0 {
-		t.Error("Expected cache to have entries before ClearCache")
+		tu.Errorf(t, "Expected cache to have entries before ClearCache")
 	}
 
 	// Clear cache
@@ -227,7 +229,7 @@ func TestPathManager_ClearCache(t *testing.T) {
 	// Verify cache is empty
 	size, _, _ = pm.GetCacheStats()
 	if size != 0 {
-		t.Errorf("Expected cache size 0 after ClearCache, got %d", size)
+		tu.Failf(t, "Expected cache size 0 after ClearCache, got %d", size)
 	}
 }
 
@@ -237,7 +239,7 @@ func TestPathManager_GetCacheStats(t *testing.T) {
 	// Initially empty
 	size, sourceEntries, cacheEntries := pm.GetCacheStats()
 	if size != 0 || sourceEntries != 0 || cacheEntries != 0 {
-		t.Errorf("Expected empty cache stats, got size=%d, source=%d, cache=%d", size, sourceEntries, cacheEntries)
+		tu.Failf(t, "Expected empty cache stats, got size=%d, source=%d, cache=%d", size, sourceEntries, cacheEntries)
 	}
 
 	// Add some entries
@@ -248,13 +250,13 @@ func TestPathManager_GetCacheStats(t *testing.T) {
 	// Check stats
 	size, sourceEntries, cacheEntries = pm.GetCacheStats()
 	if size < 2 {
-		t.Errorf("Expected at least 2 cache entries, got size=%d", size)
+		tu.Failf(t, "Expected at least 2 cache entries, got size=%d", size)
 	}
 	if sourceEntries < 2 {
-		t.Errorf("Expected at least 2 source entries, got %d", sourceEntries)
+		tu.Failf(t, "Expected at least 2 source entries, got %d", sourceEntries)
 	}
 	if cacheEntries < 1 {
-		t.Errorf("Expected at least 1 cache entry, got %d", cacheEntries)
+		tu.Failf(t, "Expected at least 1 cache entry, got %d", cacheEntries)
 	}
 }
 
@@ -262,21 +264,21 @@ func TestPathManager_Caching(t *testing.T) {
 	pm := NewPathManager("/source", "/cache")
 
 	path := "/source/file.txt"
-	
+
 	// First call should compute
 	result1 := pm.RebaseToCache(path)
-	
+
 	// Second call should use cache (same result)
 	result2 := pm.RebaseToCache(path)
-	
+
 	if result1 != result2 {
-		t.Errorf("Cached result differs: first=%s, second=%s", result1, result2)
+		tu.Failf(t, "Cached result differs: first=%s, second=%s", result1, result2)
 	}
 }
 
 func TestPathManager_CacheCleanup(t *testing.T) {
 	pm := NewPathManager("/source", "/cache")
-	
+
 	// Set a very short cache timeout for testing
 	pm.cacheTimeout = 10 * time.Millisecond
 	pm.lastCleanup = time.Now()
@@ -316,4 +318,3 @@ func TestPathManager_ConcurrentAccess(t *testing.T) {
 
 	// If we get here without panic, thread safety worked
 }
-

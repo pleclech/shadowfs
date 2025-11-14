@@ -5,12 +5,14 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	tu "github.com/pleclech/shadowfs/fs/utils/testings"
 )
 
 func TestCreateBackup(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "shadowfs-test-")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -19,12 +21,12 @@ func TestCreateBackup(t *testing.T) {
 
 	// Create source directory with some files
 	if err := os.MkdirAll(sourceDir, 0755); err != nil {
-		t.Fatalf("Failed to create source dir: %v", err)
+		tu.Failf(t, "Failed to create source dir: %v", err)
 	}
 
 	testFile := filepath.Join(sourceDir, "test.txt")
 	if err := os.WriteFile(testFile, []byte("test content"), 0644); err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
+		tu.Failf(t, "Failed to create test file: %v", err)
 	}
 
 	// Set backup directory
@@ -36,48 +38,48 @@ func TestCreateBackup(t *testing.T) {
 	// Create backup
 	backupID, backupDir, err := CreateBackup(sourceDir, mountPoint)
 	if err != nil {
-		t.Fatalf("CreateBackup failed: %v", err)
+		tu.Failf(t, "CreateBackup failed: %v", err)
 	}
 
 	if backupID == "" {
-		t.Error("Backup ID should not be empty")
+		tu.Failf(t, "Backup ID should not be empty")
 	}
 
 	if backupDir == "" {
-		t.Error("Backup directory should not be empty")
+		tu.Failf(t, "Backup directory should not be empty")
 	}
 
 	// Verify backup directory exists
 	if _, err := os.Stat(backupDir); err != nil {
-		t.Fatalf("Backup directory does not exist: %v", err)
+		tu.Failf(t, "Backup directory does not exist: %v", err)
 	}
 
 	// Verify backup info file exists
 	infoFile := filepath.Join(backupDir, ".backup-info")
 	if _, err := os.Stat(infoFile); err != nil {
-		t.Fatalf("Backup info file does not exist: %v", err)
+		tu.Failf(t, "Backup info file does not exist: %v", err)
 	}
 
 	// Verify test file was backed up
 	backedUpFile := filepath.Join(backupDir, "test.txt")
 	if _, err := os.Stat(backedUpFile); err != nil {
-		t.Fatalf("Backed up file does not exist: %v", err)
+		tu.Failf(t, "Backed up file does not exist: %v", err)
 	}
 
 	// Verify file content
 	content, err := os.ReadFile(backedUpFile)
 	if err != nil {
-		t.Fatalf("Failed to read backed up file: %v", err)
+		tu.Failf(t, "Failed to read backed up file: %v", err)
 	}
 	if string(content) != "test content" {
-		t.Errorf("Expected content 'test content', got '%s'", string(content))
+		tu.Failf(t, "Expected content 'test content', got '%s'", string(content))
 	}
 }
 
 func TestRollbackSync(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "shadowfs-test-")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -86,13 +88,13 @@ func TestRollbackSync(t *testing.T) {
 
 	// Create source directory
 	if err := os.MkdirAll(sourceDir, 0755); err != nil {
-		t.Fatalf("Failed to create source dir: %v", err)
+		tu.Failf(t, "Failed to create source dir: %v", err)
 	}
 
 	// Create initial file
 	initialFile := filepath.Join(sourceDir, "initial.txt")
 	if err := os.WriteFile(initialFile, []byte("initial content"), 0644); err != nil {
-		t.Fatalf("Failed to create initial file: %v", err)
+		tu.Failf(t, "Failed to create initial file: %v", err)
 	}
 
 	// Create backup
@@ -103,35 +105,35 @@ func TestRollbackSync(t *testing.T) {
 
 	backupID, _, err := CreateBackup(sourceDir, mountPoint)
 	if err != nil {
-		t.Fatalf("CreateBackup failed: %v", err)
+		tu.Failf(t, "CreateBackup failed: %v", err)
 	}
 
 	// Modify source file
 	if err := os.WriteFile(initialFile, []byte("modified content"), 0644); err != nil {
-		t.Fatalf("Failed to modify file: %v", err)
+		tu.Failf(t, "Failed to modify file: %v", err)
 	}
 
 	// Verify file was modified
 	content, err := os.ReadFile(initialFile)
 	if err != nil {
-		t.Fatalf("Failed to read file: %v", err)
+		tu.Failf(t, "Failed to read file: %v", err)
 	}
 	if string(content) != "modified content" {
-		t.Errorf("Expected 'modified content', got '%s'", string(content))
+		tu.Failf(t, "Expected 'modified content', got '%s'", string(content))
 	}
 
 	// Rollback
 	if err := RollbackSync(backupID, sourceDir); err != nil {
-		t.Fatalf("RollbackSync failed: %v", err)
+		tu.Failf(t, "RollbackSync failed: %v", err)
 	}
 
 	// Verify file was restored
 	content, err = os.ReadFile(initialFile)
 	if err != nil {
-		t.Fatalf("Failed to read file after rollback: %v", err)
+		tu.Failf(t, "Failed to read file after rollback: %v", err)
 	}
 	if string(content) != "initial content" {
-		t.Errorf("Expected 'initial content' after rollback, got '%s'", string(content))
+		tu.Failf(t, "Expected 'initial content' after rollback, got '%s'", string(content))
 	}
 }
 
@@ -146,11 +148,11 @@ func TestSyncOptions(t *testing.T) {
 	}
 
 	if options.MountPoint != "/test/mount" {
-		t.Errorf("Expected mount point '/test/mount', got '%s'", options.MountPoint)
+		tu.Failf(t, "Expected mount point '/test/mount', got '%s'", options.MountPoint)
 	}
 
 	if !options.Backup {
-		t.Error("Backup should be enabled")
+		tu.Failf(t, "Backup should be enabled")
 	}
 }
 
@@ -163,18 +165,18 @@ func TestBackupInfo(t *testing.T) {
 	}
 
 	if info.MountID != "test-mount-id" {
-		t.Errorf("Expected mount ID 'test-mount-id', got '%s'", info.MountID)
+		tu.Failf(t, "Expected mount ID 'test-mount-id', got '%s'", info.MountID)
 	}
 
 	if len(info.FilesChanged) != 2 {
-		t.Errorf("Expected 2 files changed, got %d", len(info.FilesChanged))
+		tu.Failf(t, "Expected 2 files changed, got %d", len(info.FilesChanged))
 	}
 }
 
 func TestListBackups(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "shadowfs-test-")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -189,48 +191,48 @@ func TestListBackups(t *testing.T) {
 
 	// Create source directories
 	if err := os.MkdirAll(sourceDir, 0755); err != nil {
-		t.Fatalf("Failed to create source dir: %v", err)
+		tu.Failf(t, "Failed to create source dir: %v", err)
 	}
 
 	// Create two backups with different mount points
 	backupID1, _, err := CreateBackup(sourceDir, mountPoint1)
 	if err != nil {
-		t.Fatalf("CreateBackup failed: %v", err)
+		tu.Failf(t, "CreateBackup failed: %v", err)
 	}
 
 	time.Sleep(10 * time.Millisecond) // Ensure different timestamps
 
 	_, _, err = CreateBackup(sourceDir, mountPoint2)
 	if err != nil {
-		t.Fatalf("CreateBackup failed: %v", err)
+		tu.Failf(t, "CreateBackup failed: %v", err)
 	}
 
 	// List all backups
 	backups, err := ListBackups("")
 	if err != nil {
-		t.Fatalf("ListBackups failed: %v", err)
+		tu.Failf(t, "ListBackups failed: %v", err)
 	}
 
 	if len(backups) < 2 {
-		t.Errorf("Expected at least 2 backups, got %d", len(backups))
+		tu.Failf(t, "Expected at least 2 backups, got %d", len(backups))
 	}
 
 	// Verify backups are sorted (newest first)
 	if len(backups) >= 2 {
 		if backups[0].Timestamp.Before(backups[1].Timestamp) {
-			t.Error("Backups should be sorted newest first")
+			tu.Failf(t, "Backups should be sorted newest first")
 		}
 	}
 
 	// List backups filtered by mount point
 	mount1Backups, err := ListBackups(mountPoint1)
 	if err != nil {
-		t.Fatalf("ListBackups failed: %v", err)
+		tu.Failf(t, "ListBackups failed: %v", err)
 	}
 
 	// Verify we found at least one backup for mount point 1
 	if len(mount1Backups) == 0 {
-		t.Error("Should find at least one backup for mount point 1")
+		tu.Failf(t, "Should find at least one backup for mount point 1")
 	}
 
 	// Verify backup ID1 is in the filtered list
@@ -242,14 +244,14 @@ func TestListBackups(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("Backup ID1 (%s) should be found when filtering by mount point 1. Found backups: %v", backupID1, mount1Backups)
+		tu.Failf(t, "Backup ID1 (%s) should be found when filtering by mount point 1. Found backups: %v", backupID1, mount1Backups)
 	}
 }
 
 func TestReadBackupInfo(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "shadowfs-test-")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -262,39 +264,39 @@ func TestReadBackupInfo(t *testing.T) {
 	mountPoint := filepath.Join(tempDir, "mount")
 
 	if err := os.MkdirAll(sourceDir, 0755); err != nil {
-		t.Fatalf("Failed to create source dir: %v", err)
+		tu.Failf(t, "Failed to create source dir: %v", err)
 	}
 
 	backupID, _, err := CreateBackup(sourceDir, mountPoint)
 	if err != nil {
-		t.Fatalf("CreateBackup failed: %v", err)
+		tu.Failf(t, "CreateBackup failed: %v", err)
 	}
 
 	// Read backup info
 	info, err := ReadBackupInfo(backupID)
 	if err != nil {
-		t.Fatalf("ReadBackupInfo failed: %v", err)
+		tu.Failf(t, "ReadBackupInfo failed: %v", err)
 	}
 
 	if info.SourcePath != sourceDir {
-		t.Errorf("Expected source path '%s', got '%s'", sourceDir, info.SourcePath)
+		tu.Failf(t, "Expected source path '%s', got '%s'", sourceDir, info.SourcePath)
 	}
 
 	if info.MountID == "" {
-		t.Error("Mount ID should not be empty")
+		tu.Failf(t, "Mount ID should not be empty")
 	}
 
 	// Test reading non-existent backup
 	_, err = ReadBackupInfo("non-existent-backup-id")
 	if err == nil {
-		t.Error("ReadBackupInfo should fail for non-existent backup")
+		tu.Failf(t, "ReadBackupInfo should fail for non-existent backup")
 	}
 }
 
 func TestDeleteBackup(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "shadowfs-test-")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -307,40 +309,40 @@ func TestDeleteBackup(t *testing.T) {
 	mountPoint := filepath.Join(tempDir, "mount")
 
 	if err := os.MkdirAll(sourceDir, 0755); err != nil {
-		t.Fatalf("Failed to create source dir: %v", err)
+		tu.Failf(t, "Failed to create source dir: %v", err)
 	}
 
 	backupID, backupDir, err := CreateBackup(sourceDir, mountPoint)
 	if err != nil {
-		t.Fatalf("CreateBackup failed: %v", err)
+		tu.Failf(t, "CreateBackup failed: %v", err)
 	}
 
 	// Verify backup exists
 	if _, err := os.Stat(backupDir); err != nil {
-		t.Fatalf("Backup directory should exist: %v", err)
+		tu.Failf(t, "Backup directory should exist: %v", err)
 	}
 
 	// Delete backup
 	if err := DeleteBackup(backupID); err != nil {
-		t.Fatalf("DeleteBackup failed: %v", err)
+		tu.Failf(t, "DeleteBackup failed: %v", err)
 	}
 
 	// Verify backup is deleted
 	if _, err := os.Stat(backupDir); err == nil {
-		t.Error("Backup directory should be deleted")
+		tu.Failf(t, "Backup directory should be deleted")
 	}
 
 	// Test deleting non-existent backup
 	err = DeleteBackup("non-existent-backup-id")
 	if err == nil {
-		t.Error("DeleteBackup should fail for non-existent backup")
+		tu.Failf(t, "DeleteBackup should fail for non-existent backup")
 	}
 }
 
 func TestCleanupOldBackups(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "shadowfs-test-")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -353,29 +355,29 @@ func TestCleanupOldBackups(t *testing.T) {
 	mountPoint := filepath.Join(tempDir, "mount")
 
 	if err := os.MkdirAll(sourceDir, 0755); err != nil {
-		t.Fatalf("Failed to create source dir: %v", err)
+		tu.Failf(t, "Failed to create source dir: %v", err)
 	}
 
 	// Create a backup
 	backupID, _, err := CreateBackup(sourceDir, mountPoint)
 	if err != nil {
-		t.Fatalf("CreateBackup failed: %v", err)
+		tu.Failf(t, "CreateBackup failed: %v", err)
 	}
 
 	// Cleanup backups older than 0 days (should delete all)
 	deletedCount, err := CleanupOldBackups(0, "")
 	if err != nil {
-		t.Fatalf("CleanupOldBackups failed: %v", err)
+		tu.Failf(t, "CleanupOldBackups failed: %v", err)
 	}
 
 	if deletedCount == 0 {
-		t.Error("At least one backup should be deleted")
+		tu.Failf(t, "At least one backup should be deleted")
 	}
 
 	// Verify backup is deleted
 	_, err = ReadBackupInfo(backupID)
 	if err == nil {
-		t.Error("Backup should be deleted")
+		tu.Failf(t, "Backup should be deleted")
 	}
 }
 
@@ -389,15 +391,14 @@ func TestBackupListItem(t *testing.T) {
 	}
 
 	if item.ID != "test-id" {
-		t.Errorf("Expected ID 'test-id', got '%s'", item.ID)
+		tu.Failf(t, "Expected ID 'test-id', got '%s'", item.ID)
 	}
 
 	if item.Size != 1024 {
-		t.Errorf("Expected size 1024, got %d", item.Size)
+		tu.Failf(t, "Expected size 1024, got %d", item.Size)
 	}
 
 	if item.FileCount != 5 {
-		t.Errorf("Expected file count 5, got %d", item.FileCount)
+		tu.Failf(t, "Expected file count 5, got %d", item.FileCount)
 	}
 }
-

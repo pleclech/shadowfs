@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+
+	tu "github.com/pleclech/shadowfs/fs/utils/testings"
 )
 
 func TestValidateName(t *testing.T) {
@@ -29,7 +31,8 @@ func TestValidateName(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := ValidateName(tt.input)
 			if result != tt.expected {
-				t.Errorf("ValidateName(%q) = %v, expected %v", tt.input, result, tt.expected)
+				tu.Failf(
+					t, "ValidateName(%q) = %v, expected %v", tt.input, result, tt.expected)
 			}
 		})
 	}
@@ -38,14 +41,14 @@ func TestValidateName(t *testing.T) {
 func TestValidatePathWithinRoot(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "validation-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
 	// Create subdirectories
 	subDir := filepath.Join(tempDir, "subdir")
 	if err := os.Mkdir(subDir, 0755); err != nil {
-		t.Fatalf("Failed to create subdirectory: %v", err)
+		tu.Failf(t, "Failed to create subdirectory: %v", err)
 	}
 
 	tests := []struct {
@@ -97,17 +100,21 @@ func TestValidatePathWithinRoot(t *testing.T) {
 			cleaned, err := ValidatePathWithinRoot(tt.path, tt.root)
 			if tt.shouldErr {
 				if err == nil {
-					t.Errorf("ValidatePathWithinRoot(%q, %q) expected error, got nil", tt.path, tt.root)
+					tu.Failf(
+						t, "ValidatePathWithinRoot(%q, %q) expected error, got nil", tt.path, tt.root)
 				}
 				if err != syscall.EPERM {
-					t.Errorf("ValidatePathWithinRoot(%q, %q) expected EPERM, got %v", tt.path, tt.root, err)
+					tu.Failf(
+						t, "ValidatePathWithinRoot(%q, %q) expected EPERM, got %v", tt.path, tt.root, err)
 				}
 			} else {
 				if err != nil {
-					t.Errorf("ValidatePathWithinRoot(%q, %q) unexpected error: %v", tt.path, tt.root, err)
+					tu.Failf(
+						t, "ValidatePathWithinRoot(%q, %q) unexpected error: %v", tt.path, tt.root, err)
 				}
 				if cleaned == "" {
-					t.Error("ValidatePathWithinRoot() returned empty cleaned path")
+					tu.Failf(
+						t, "ValidatePathWithinRoot() returned empty cleaned path")
 				}
 			}
 		})
@@ -117,14 +124,13 @@ func TestValidatePathWithinRoot(t *testing.T) {
 func TestValidatePathWithinRoot_InvalidPath(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "validation-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
 	// Test with invalid characters (if any)
 	_, err = ValidatePathWithinRoot("\x00invalid", tempDir)
 	if err == nil {
-		t.Error("ValidatePathWithinRoot() with invalid path should return error")
+		tu.Failf(t, "ValidatePathWithinRoot() with invalid path should return error")
 	}
 }
-

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	tu "github.com/pleclech/shadowfs/fs/utils/testings"
 	"github.com/pleclech/shadowfs/fs/xattr"
 )
 
@@ -21,13 +22,13 @@ func TestShadowNode_PathRebasing(t *testing.T) {
 	expectedCachedPath := filepath.Join(ts.CacheDir, "test.txt")
 
 	if cachedPath != expectedCachedPath {
-		t.Errorf("RebasePathUsingCache() = %v, want %v", cachedPath, expectedCachedPath)
+		tu.Failf(t, "RebasePathUsingCache() = %v, want %v", cachedPath, expectedCachedPath)
 	}
 
 	// Test rebasing cache path to source
 	rebasedSource := ts.Root.RebasePathUsingSrc(cachedPath)
 	if rebasedSource != sourcePath {
-		t.Errorf("RebasePathUsingSrc() = %v, want %v", rebasedSource, sourcePath)
+		tu.Failf(t, "RebasePathUsingSrc() = %v, want %v", rebasedSource, sourcePath)
 	}
 }
 
@@ -38,24 +39,24 @@ func TestShadowNode_CreateMirroredDir(t *testing.T) {
 	// Create a directory structure in source
 	sourceDir := filepath.Join(ts.SrcDir, "testdir", "subdir")
 	if err := os.MkdirAll(sourceDir, 0755); err != nil {
-		t.Fatalf("Failed to create source directory: %v", err)
+		tu.Failf(t, "Failed to create source directory: %v", err)
 	}
 
 	// Test creating mirrored directory
 	targetPath := filepath.Join(ts.CacheDir, "testdir", "subdir")
 	result, err := ts.Root.createMirroredDir(targetPath)
 	if err != nil {
-		t.Errorf("createMirroredDir() failed: %v", err)
+		tu.Failf(t, "createMirroredDir() failed: %v", err)
 	}
 	if result != targetPath {
-		t.Errorf("createMirroredDir() = %v, want %v", result, targetPath)
+		tu.Failf(t, "createMirroredDir() = %v, want %v", result, targetPath)
 	}
 
 	// Verify directory exists
 	if stat, err := os.Stat(targetPath); err != nil {
-		t.Errorf("Mirrored directory does not exist: %v", err)
+		tu.Failf(t, "Mirrored directory does not exist: %v", err)
 	} else if !stat.IsDir() {
-		t.Error("Mirrored path is not a directory")
+		tu.Failf(t, "Mirrored path is not a directory")
 	}
 }
 
@@ -66,23 +67,23 @@ func TestShadowNode_CreateMirroredFileOrDir(t *testing.T) {
 	// Test creating mirrored file
 	sourceFile := filepath.Join(ts.SrcDir, "testfile.txt")
 	if err := os.WriteFile(sourceFile, []byte("test content"), 0644); err != nil {
-		t.Fatalf("Failed to create source file: %v", err)
+		tu.Failf(t, "Failed to create source file: %v", err)
 	}
 
 	targetPath := filepath.Join(ts.CacheDir, "testfile.txt")
 	result, err := ts.Root.CreateMirroredFileOrDir(sourceFile)
 	if err != nil {
-		t.Errorf("CreateMirroredFileOrDir() failed: %v", err)
+		tu.Failf(t, "CreateMirroredFileOrDir() failed: %v", err)
 	}
 	if result != targetPath {
-		t.Errorf("CreateMirroredFileOrDir() = %v, want %v", result, targetPath)
+		tu.Failf(t, "CreateMirroredFileOrDir() = %v, want %v", result, targetPath)
 	}
 
 	// Verify file exists
 	if stat, err := os.Stat(targetPath); err != nil {
-		t.Errorf("Mirrored file does not exist: %v", err)
+		tu.Failf(t, "Mirrored file does not exist: %v", err)
 	} else if stat.IsDir() {
-		t.Error("Mirrored path is a directory, expected file")
+		tu.Failf(t, "Mirrored path is a directory, expected file")
 	}
 }
 
@@ -93,23 +94,23 @@ func TestShadowNode_CreateMirroredFileOrDir_Directory(t *testing.T) {
 	// Test creating mirrored directory
 	sourceDir := filepath.Join(ts.SrcDir, "testdir")
 	if err := os.MkdirAll(sourceDir, 0755); err != nil {
-		t.Fatalf("Failed to create source directory: %v", err)
+		tu.Failf(t, "Failed to create source directory: %v", err)
 	}
 
 	targetPath := filepath.Join(ts.CacheDir, "testdir")
 	result, err := ts.Root.CreateMirroredFileOrDir(sourceDir)
 	if err != nil {
-		t.Errorf("CreateMirroredFileOrDir() failed: %v", err)
+		tu.Failf(t, "CreateMirroredFileOrDir() failed: %v", err)
 	}
 	if result != targetPath {
-		t.Errorf("CreateMirroredFileOrDir() = %v, want %v", result, targetPath)
+		tu.Failf(t, "CreateMirroredFileOrDir() = %v, want %v", result, targetPath)
 	}
 
 	// Verify directory exists
 	if stat, err := os.Stat(targetPath); err != nil {
-		t.Errorf("Mirrored directory does not exist: %v", err)
+		tu.Failf(t, "Mirrored directory does not exist: %v", err)
 	} else if !stat.IsDir() {
-		t.Error("Mirrored path is not a directory")
+		tu.Failf(t, "Mirrored path is not a directory")
 	}
 }
 
@@ -126,38 +127,38 @@ func TestShadowNode_FileOperations(t *testing.T) {
 
 	// Initially, file should not exist in cache
 	if _, err := os.Stat(cachedFile); err == nil {
-		t.Error("File should not exist in cache initially")
+		tu.Failf(t, "File should not exist in cache initially")
 	}
 
 	// Create mirrored file
 	_, err := ts.Root.CreateMirroredFileOrDir(sourceFile)
 	if err != nil {
-		t.Fatalf("Failed to create mirrored file: %v", err)
+		tu.Failf(t, "Failed to create mirrored file: %v", err)
 	}
 
 	// Verify file exists in cache
 	if _, err := os.Stat(cachedFile); err != nil {
-		t.Errorf("File should exist in cache after mirroring: %v", err)
+		tu.Failf(t, "File should exist in cache after mirroring: %v", err)
 	}
 
 	// Test deletion tracking
 	attr := xattr.XAttr{PathStatus: xattr.PathStatusDeleted}
 	errno := xattr.Set(cachedFile, &attr)
 	if errno != 0 {
-		t.Errorf("SetShadowXAttr() failed: %v", errno)
+		tu.Failf(t, "SetShadowXAttr() failed: %v", errno)
 	}
 
 	// Verify file is marked as deleted
 	var retrievedAttr xattr.XAttr
 	exists, errno := xattr.Get(cachedFile, &retrievedAttr)
 	if errno != 0 {
-		t.Errorf("GetShadowXAttr() failed: %v", errno)
+		tu.Failf(t, "GetShadowXAttr() failed: %v", errno)
 	}
 	if !exists {
-		t.Error("Expected xattr to exist")
+		tu.Failf(t, "Expected xattr to exist")
 	}
 	if !xattr.IsPathDeleted(retrievedAttr) {
-		t.Error("Expected file to be marked as deleted")
+		tu.Failf(t, "Expected file to be marked as deleted")
 	}
 }
 
@@ -174,20 +175,20 @@ func TestShadowNode_DirectoryOperations(t *testing.T) {
 
 	// Initially, directory should not exist in cache
 	if _, err := os.Stat(cachedDir); err == nil {
-		t.Error("Directory should not exist in cache initially")
+		tu.Failf(t, "Directory should not exist in cache initially")
 	}
 
 	// Create mirrored directory
 	_, err := ts.Root.CreateMirroredFileOrDir(sourceDir)
 	if err != nil {
-		t.Fatalf("Failed to create mirrored directory: %v", err)
+		tu.Failf(t, "Failed to create mirrored directory: %v", err)
 	}
 
 	// Verify directory exists in cache
 	if stat, err := os.Stat(cachedDir); err != nil {
-		t.Errorf("Directory should exist in cache after mirroring: %v", err)
+		tu.Failf(t, "Directory should exist in cache after mirroring: %v", err)
 	} else if !stat.IsDir() {
-		t.Error("Mirrored path should be a directory")
+		tu.Failf(t, "Mirrored path should be a directory")
 	}
 }
 
@@ -205,18 +206,18 @@ func TestShadowNode_NestedPathOperations(t *testing.T) {
 	expectedCachedPath := filepath.Join(ts.CacheDir, nestedFile)
 
 	if cachedPath != expectedCachedPath {
-		t.Errorf("RebasePathUsingCache() for nested path = %v, want %v", cachedPath, expectedCachedPath)
+		tu.Failf(t, "RebasePathUsingCache() for nested path = %v, want %v", cachedPath, expectedCachedPath)
 	}
 
 	// Test creating mirrored nested structure
 	_, err := ts.Root.CreateMirroredFileOrDir(sourcePath)
 	if err != nil {
-		t.Errorf("CreateMirroredFileOrDir() failed for nested path: %v", err)
+		tu.Failf(t, "CreateMirroredFileOrDir() failed for nested path: %v", err)
 	}
 
 	// Verify nested file exists in cache
 	if _, err := os.Stat(expectedCachedPath); err != nil {
-		t.Errorf("Nested file should exist in cache: %v", err)
+		tu.Failf(t, "Nested file should exist in cache: %v", err)
 	}
 }
 
@@ -228,7 +229,7 @@ func TestShadowNode_ErrorHandling(t *testing.T) {
 	nonExistentSource := filepath.Join(ts.SrcDir, "nonexistent.txt")
 	_, err := ts.Root.CreateMirroredFileOrDir(nonExistentSource)
 	if err == nil {
-		t.Error("Expected error for non-existent source file")
+		tu.Failf(t, "Expected error for non-existent source file")
 	}
 
 	// Test xattr operations on non-existent files
@@ -236,9 +237,9 @@ func TestShadowNode_ErrorHandling(t *testing.T) {
 	var attr xattr.XAttr
 	exists, errno := xattr.Get(nonExistentCache, &attr)
 	if errno != 0 {
-		t.Errorf("GetShadowXAttr() on non-existent file should not error: %v", errno)
+		tu.Failf(t, "GetShadowXAttr() on non-existent file should not error: %v", errno)
 	}
 	if exists {
-		t.Error("Expected xattr to not exist on non-existent file")
+		tu.Failf(t, "Expected xattr to not exist on non-existent file")
 	}
 }

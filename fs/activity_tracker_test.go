@@ -6,16 +6,18 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	tu "github.com/pleclech/shadowfs/fs/utils/testings"
 )
 
 func TestActivityTracker_CommitAllPending(t *testing.T) {
 	tests := []struct {
-		name           string
-		gitEnabled     bool
-		activeFiles    []string
-		expectCommit   bool
-		expectBatch    bool
-		expectedCount  int
+		name          string
+		gitEnabled    bool
+		activeFiles   []string
+		expectCommit  bool
+		expectBatch   bool
+		expectedCount int
 	}{
 		{
 			name:          "commits multiple pending files",
@@ -55,7 +57,8 @@ func TestActivityTracker_CommitAllPending(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tempDir, err := os.MkdirTemp("", "activity-test")
 			if err != nil {
-				t.Fatalf("Failed to create temp dir: %v", err)
+				tu.Failf(
+					t, "Failed to create temp dir: %v", err)
 			}
 			defer os.RemoveAll(tempDir)
 
@@ -75,7 +78,8 @@ func TestActivityTracker_CommitAllPending(t *testing.T) {
 				// Create the file so Git can stage it
 				if tt.gitEnabled {
 					if err := os.WriteFile(fullPath, []byte("test content"), 0644); err != nil {
-						t.Fatalf("Failed to create test file: %v", err)
+						tu.Failf(
+							t, "Failed to create test file: %v", err)
 					}
 				}
 				at.MarkActivity(fullPath)
@@ -85,12 +89,14 @@ func TestActivityTracker_CommitAllPending(t *testing.T) {
 			activeFiles := at.GetActiveFiles()
 			if tt.gitEnabled {
 				if len(activeFiles) != len(tt.activeFiles) {
-					t.Errorf("Expected %d active files, got %d", len(tt.activeFiles), len(activeFiles))
+					tu.Failf(
+						t, "Expected %d active files, got %d", len(tt.activeFiles), len(activeFiles))
 				}
 			} else {
 				// When Git is disabled, MarkActivity doesn't track files
 				if len(activeFiles) != 0 {
-					t.Errorf("Expected 0 active files when Git disabled, got %d", len(activeFiles))
+					tu.Failf(
+						t, "Expected 0 active files when Git disabled, got %d", len(activeFiles))
 				}
 			}
 
@@ -99,20 +105,22 @@ func TestActivityTracker_CommitAllPending(t *testing.T) {
 			// For Git-enabled tests, commits may fail if Git repo isn't initialized
 			// That's acceptable - we're testing the CommitAllPending logic, not Git setup
 			if commitErr != nil && tt.gitEnabled {
-				t.Logf("CommitAllPending() error (may be expected if Git repo not initialized): %v", commitErr)
+				tu.Debugf(t, "CommitAllPending() error (may be expected if Git repo not initialized): %v", commitErr)
 			}
 
 			// Verify timers are cleared
 			activeFilesAfter := at.GetActiveFiles()
 			if len(activeFilesAfter) != 0 {
-				t.Errorf("Expected 0 active files after CommitAllPending, got %d", len(activeFilesAfter))
+				tu.Failf(
+					t, "Expected 0 active files after CommitAllPending, got %d", len(activeFilesAfter))
 			}
 
 			// For tests expecting commits, we verify by checking that CommitAllPending completed without error
 			// Actual commit verification would require Git repository setup which is complex
 			// The important thing is that CommitAllPending doesn't error and clears timers
 			if !tt.gitEnabled && commitErr != nil {
-				t.Errorf("CommitAllPending() should return nil when Git disabled, got %v", commitErr)
+				tu.Failf(
+					t, "CommitAllPending() should return nil when Git disabled, got %v", commitErr)
 			}
 		})
 	}
@@ -121,7 +129,7 @@ func TestActivityTracker_CommitAllPending(t *testing.T) {
 func TestActivityTracker_StopIdleMonitoring(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "activity-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -143,7 +151,7 @@ func TestActivityTracker_StopIdleMonitoring(t *testing.T) {
 	// Verify files are tracked
 	activeFiles := at.GetActiveFiles()
 	if len(activeFiles) != len(files) {
-		t.Errorf("Expected %d active files, got %d", len(files), len(activeFiles))
+		tu.Failf(t, "Expected %d active files, got %d", len(files), len(activeFiles))
 	}
 
 	// Stop monitoring
@@ -152,7 +160,7 @@ func TestActivityTracker_StopIdleMonitoring(t *testing.T) {
 	// Verify all timers are cleared
 	activeFilesAfter := at.GetActiveFiles()
 	if len(activeFilesAfter) != 0 {
-		t.Errorf("Expected 0 active files after StopIdleMonitoring, got %d", len(activeFilesAfter))
+		tu.Failf(t, "Expected 0 active files after StopIdleMonitoring, got %d", len(activeFilesAfter))
 	}
 
 	// StopIdleMonitoring doesn't commit, it just clears timers
@@ -194,7 +202,8 @@ func TestActivityTracker_commitFilesBatch(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tempDir, err := os.MkdirTemp("", "activity-test")
 			if err != nil {
-				t.Fatalf("Failed to create temp dir: %v", err)
+				tu.Failf(
+					t, "Failed to create temp dir: %v", err)
 			}
 			defer os.RemoveAll(tempDir)
 
@@ -214,7 +223,8 @@ func TestActivityTracker_commitFilesBatch(t *testing.T) {
 				fullPath := filepath.Join(tempDir, filepath.Base(file))
 				// Create the file so Git can stage it
 				if err := os.WriteFile(fullPath, []byte("test content"), 0644); err != nil {
-					t.Fatalf("Failed to create test file: %v", err)
+					tu.Failf(
+						t, "Failed to create test file: %v", err)
 				}
 				at.MarkActivity(fullPath)
 			}
@@ -224,7 +234,7 @@ func TestActivityTracker_commitFilesBatch(t *testing.T) {
 			// Commits may fail if Git repo isn't initialized - that's acceptable
 			// We're testing the CommitAllPending logic, not Git setup
 			if commitErr != nil {
-				t.Logf("CommitAllPending() error (may be expected if Git repo not initialized): %v", commitErr)
+				tu.Debugf(t, "CommitAllPending() error (may be expected if Git repo not initialized): %v", commitErr)
 			}
 		})
 	}
@@ -233,7 +243,7 @@ func TestActivityTracker_commitFilesBatch(t *testing.T) {
 func TestActivityTracker_hasSignificantChanges(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "activity-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -258,7 +268,8 @@ func TestActivityTracker_hasSignificantChanges(t *testing.T) {
 		fullPath := filepath.Join(tempDir, file)
 		result := at.hasSignificantChanges(fullPath)
 		if !result {
-			t.Errorf("hasSignificantChanges(%s) = false, expected true", fullPath)
+			tu.Failf(
+				t, "hasSignificantChanges(%s) = false, expected true", fullPath)
 		}
 	}
 }
@@ -266,7 +277,7 @@ func TestActivityTracker_hasSignificantChanges(t *testing.T) {
 func TestActivityTracker_TimerRescheduling(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "activity-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -274,7 +285,7 @@ func TestActivityTracker_TimerRescheduling(t *testing.T) {
 		AutoCommit: true,
 	})
 	shadowNode := &ShadowNode{gitManager: gm}
-	
+
 	// Use very short safety window to test rescheduling
 	at := NewActivityTracker(shadowNode, GitConfig{
 		IdleTimeout:  10 * time.Millisecond,
@@ -290,7 +301,7 @@ func TestActivityTracker_TimerRescheduling(t *testing.T) {
 	// File should still be tracked (timer rescheduled)
 	activeFiles := at.GetActiveFiles()
 	if len(activeFiles) == 0 {
-		t.Error("Expected file to still be tracked after idle timeout (should reschedule)")
+		tu.Failf(t, "Expected file to still be tracked after idle timeout (should reschedule)")
 	}
 
 	// Wait for safety window to pass
@@ -299,14 +310,14 @@ func TestActivityTracker_TimerRescheduling(t *testing.T) {
 	// Now file should be committed and removed from tracking
 	activeFilesAfter := at.GetActiveFiles()
 	if len(activeFilesAfter) > 0 {
-		t.Logf("File still tracked after safety window, this is expected if commit hasn't completed yet")
+		tu.Debugf(t, "File still tracked after safety window, this is expected if commit hasn't completed yet")
 	}
 }
 
 func TestActivityTracker_ConcurrentAccess(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "activity-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -341,7 +352,7 @@ func TestActivityTracker_ConcurrentAccess(t *testing.T) {
 	activeFiles := at.GetActiveFiles()
 	expectedCount := numGoroutines * filesPerGoroutine
 	if len(activeFiles) != expectedCount {
-		t.Errorf("Expected %d active files, got %d", expectedCount, len(activeFiles))
+		tu.Failf(t, "Expected %d active files, got %d", expectedCount, len(activeFiles))
 	}
 
 	// Test concurrent CommitAllPending
@@ -356,14 +367,14 @@ func TestActivityTracker_ConcurrentAccess(t *testing.T) {
 	// Verify all files are cleared
 	activeFilesAfter := at.GetActiveFiles()
 	if len(activeFilesAfter) != 0 {
-		t.Errorf("Expected 0 active files after CommitAllPending, got %d", len(activeFilesAfter))
+		tu.Failf(t, "Expected 0 active files after CommitAllPending, got %d", len(activeFilesAfter))
 	}
 }
 
 func TestActivityTracker_MarkActivity_GitDisabled(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "activity-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -382,14 +393,14 @@ func TestActivityTracker_MarkActivity_GitDisabled(t *testing.T) {
 	// When Git is disabled, MarkActivity should return early and not track
 	activeFiles := at.GetActiveFiles()
 	if len(activeFiles) != 0 {
-		t.Errorf("Expected 0 active files when Git is disabled, got %d", len(activeFiles))
+		tu.Failf(t, "Expected 0 active files when Git is disabled, got %d", len(activeFiles))
 	}
 }
 
 func TestActivityTracker_GetActiveFiles(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "activity-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -405,7 +416,7 @@ func TestActivityTracker_GetActiveFiles(t *testing.T) {
 	// Initially no active files
 	activeFiles := at.GetActiveFiles()
 	if len(activeFiles) != 0 {
-		t.Errorf("Expected 0 active files initially, got %d", len(activeFiles))
+		tu.Failf(t, "Expected 0 active files initially, got %d", len(activeFiles))
 	}
 
 	// Mark activity for multiple files (use tempDir-relative paths)
@@ -418,7 +429,7 @@ func TestActivityTracker_GetActiveFiles(t *testing.T) {
 	// Verify all files are returned
 	activeFiles = at.GetActiveFiles()
 	if len(activeFiles) != len(files) {
-		t.Errorf("Expected %d active files, got %d", len(files), len(activeFiles))
+		tu.Failf(t, "Expected %d active files, got %d", len(files), len(activeFiles))
 	}
 
 	// Verify file paths match (check for full paths)
@@ -429,7 +440,8 @@ func TestActivityTracker_GetActiveFiles(t *testing.T) {
 	for _, file := range files {
 		fullPath := filepath.Join(tempDir, file)
 		if !fileMap[fullPath] {
-			t.Errorf("Expected file %s in active files, but not found", fullPath)
+			tu.Failf(
+				t, "Expected file %s in active files, but not found", fullPath)
 		}
 	}
 }
@@ -437,7 +449,7 @@ func TestActivityTracker_GetActiveFiles(t *testing.T) {
 func TestActivityTracker_IsIdle(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "activity-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -454,7 +466,7 @@ func TestActivityTracker_IsIdle(t *testing.T) {
 
 	// File should be idle initially
 	if !at.IsIdle(testFile) {
-		t.Error("Expected file to be idle initially")
+		tu.Failf(t, "Expected file to be idle initially")
 	}
 
 	// Mark activity
@@ -462,7 +474,7 @@ func TestActivityTracker_IsIdle(t *testing.T) {
 
 	// File should not be idle
 	if at.IsIdle(testFile) {
-		t.Error("Expected file to not be idle after MarkActivity")
+		tu.Failf(t, "Expected file to not be idle after MarkActivity")
 	}
 
 	// Wait for timeout and commit
@@ -470,14 +482,14 @@ func TestActivityTracker_IsIdle(t *testing.T) {
 
 	// File should be idle again after commit
 	if !at.IsIdle(testFile) {
-		t.Log("File may still be tracked if commit hasn't completed, this is acceptable")
+		tu.Debugf(t, "File may still be tracked if commit hasn't completed, this is acceptable")
 	}
 }
 
 func TestActivityTracker_CommitAllPending_ErrorHandling(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "activity-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -498,14 +510,14 @@ func TestActivityTracker_CommitAllPending_ErrorHandling(t *testing.T) {
 	// CommitAllPending should return nil when Git is disabled
 	commitErr := at.CommitAllPending()
 	if commitErr != nil {
-		t.Errorf("CommitAllPending() with Git disabled should return nil, got %v", commitErr)
+		tu.Failf(t, "CommitAllPending() with Git disabled should return nil, got %v", commitErr)
 	}
 }
 
 func TestActivityTracker_MarkActivity_ResetsTimer(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "activity-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -534,7 +546,7 @@ func TestActivityTracker_MarkActivity_ResetsTimer(t *testing.T) {
 	// Verify timer was reset (file still tracked)
 	activeFiles := at.GetActiveFiles()
 	if len(activeFiles) != 1 {
-		t.Errorf("Expected 1 active file after second MarkActivity, got %d", len(activeFiles))
+		tu.Failf(t, "Expected 1 active file after second MarkActivity, got %d", len(activeFiles))
 	}
 
 	// If timer wasn't reset, commit would have happened by now
@@ -544,7 +556,6 @@ func TestActivityTracker_MarkActivity_ResetsTimer(t *testing.T) {
 	// File should still be tracked if timer was properly reset
 	activeFilesAfter := at.GetActiveFiles()
 	if len(activeFilesAfter) == 0 && time2.Sub(time1) < 50*time.Millisecond {
-		t.Log("Timer may have fired, but this is acceptable if enough time passed")
+		tu.Debugf(t, "Timer may have fired, but this is acceptable if enough time passed")
 	}
 }
-

@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	tu "github.com/pleclech/shadowfs/fs/utils/testings"
 )
 
 func TestStress_LargeDirectory(t *testing.T) {
@@ -48,10 +50,10 @@ func TestStress_LargeDirectory(t *testing.T) {
 	duration := time.Since(start)
 
 	if successCount != numFiles {
-		t.Errorf("Expected %d successful rebasings, got %d", numFiles, successCount)
+		tu.Failf(t, "Expected %d successful rebasings, got %d", numFiles, successCount)
 	}
 
-	t.Logf("Rebased %d paths in %v", successCount, duration)
+	tu.Infof(t, "Rebased %d paths in %v", successCount, duration)
 }
 
 func TestStress_DeepHierarchy(t *testing.T) {
@@ -101,10 +103,10 @@ func TestStress_DeepHierarchy(t *testing.T) {
 	duration := time.Since(start)
 
 	if successCount != len(paths) {
-		t.Errorf("Expected %d successful rebasings, got %d", len(paths), successCount)
+		tu.Failf(t, "Expected %d successful rebasings, got %d", len(paths), successCount)
 	}
 
-	t.Logf("Rebased %d deep paths in %v", successCount, duration)
+	tu.Infof(t, "Rebased %d deep paths in %v", successCount, duration)
 }
 
 func TestStress_ConcurrentOperations(t *testing.T) {
@@ -164,7 +166,7 @@ func TestStress_ConcurrentOperations(t *testing.T) {
 
 	// Check for any errors
 	for err := range errors {
-		t.Error(err)
+		tu.Errorf(t, "Concurrent operation failed: %v", err)
 	}
 }
 
@@ -217,14 +219,16 @@ func TestEdgeCase_SpecialCharacters(t *testing.T) {
 				_ = cachedPath
 			} else {
 				if cachedPath != expectedCachedPath {
-					t.Errorf("RebasePathUsingCache failed for %s: got %v, want %v",
+					tu.Failf(
+						t, "RebasePathUsingCache failed for %s: got %v, want %v",
 						name, cachedPath, expectedCachedPath)
 				}
 
 				// Test reverse rebasing
 				rebasedSource := ts.Root.RebasePathUsingSrc(cachedPath)
 				if rebasedSource != sourcePath {
-					t.Errorf("RebasePathUsingSrc failed for %s: got %v, want %v",
+					tu.Failf(
+						t, "RebasePathUsingSrc failed for %s: got %v, want %v",
 						name, rebasedSource, sourcePath)
 				}
 			}
@@ -247,10 +251,10 @@ func TestEdgeCase_PermissionDenied(t *testing.T) {
 	relativePath := strings.TrimPrefix(sourceFullPath, ts.Root.srcDir)
 	restrictedCacheDir := filepath.Join(ts.CacheDir, relativePath, "restricted")
 	if err := os.MkdirAll(filepath.Dir(restrictedCacheDir), 0755); err != nil {
-		t.Fatalf("Failed to create parent directory: %v", err)
+		tu.Failf(t, "Failed to create parent directory: %v", err)
 	}
 	if err := os.Mkdir(restrictedCacheDir, 0000); err != nil {
-		t.Fatalf("Failed to create restricted cache directory: %v", err)
+		tu.Failf(t, "Failed to create restricted cache directory: %v", err)
 	}
 	defer os.Chmod(restrictedCacheDir, 0755) // Cleanup: restore permissions
 
@@ -265,10 +269,10 @@ func TestEdgeCase_PermissionDenied(t *testing.T) {
 
 	// Should fail with permission denied when trying to create in restricted cache directory
 	if errno == 0 {
-		t.Error("Expected permission denied error when creating file in restricted cache directory")
+		tu.Errorf(t, "Expected permission denied error when creating file in restricted cache directory")
 	}
 	if errno != syscall.EACCES && errno != syscall.EPERM {
-		t.Errorf("Expected EACCES or EPERM, got %v", errno)
+		tu.Failf(t, "Expected EACCES or EPERM, got %v", errno)
 	}
 }
 
@@ -289,10 +293,10 @@ func TestEdgeCase_LongPathNames(t *testing.T) {
 
 	// Should fail with ENAMETOOLONG or similar error
 	if errno == 0 {
-		t.Error("Expected failure for overly long filename")
+		tu.Errorf(t, "Expected failure for overly long filename")
 	}
 	if errno != syscall.ENAMETOOLONG && errno != 0 {
-		t.Logf("Got error %v for overly long filename (expected ENAMETOOLONG)", errno)
+		tu.Errorf(t, "Got error %v for overly long filename (expected ENAMETOOLONG)", errno)
 	}
 }
 
@@ -332,11 +336,11 @@ func TestEdgeCase_MemoryUsage(t *testing.T) {
 		memUsed = m1.Alloc - m2.Alloc
 	}
 
-	t.Logf("Memory used for %d path operations: %d bytes", numOperations*2, memUsed)
+	tu.Infof(t, "Memory used for %d path operations: %d bytes", numOperations*2, memUsed)
 
 	// Memory usage should be reasonable (less than 5MB for 2000 path operations)
 	if memUsed > 5*1024*1024 {
-		t.Errorf("Excessive memory usage: %d bytes", memUsed)
+		tu.Failf(t, "Excessive memory usage: %d bytes", memUsed)
 	}
 }
 
@@ -355,7 +359,8 @@ func TestEdgeCase_RapidCreateDelete(t *testing.T) {
 		expectedCachedPath := filepath.Join(ts.CacheDir, filename)
 
 		if cachedPath != expectedCachedPath {
-			t.Errorf("RebasePathUsingCache failed at iteration %d: got %v, want %v",
+			tu.Failf(
+				t, "RebasePathUsingCache failed at iteration %d: got %v, want %v",
 				i, cachedPath, expectedCachedPath)
 			break
 		}
@@ -363,7 +368,8 @@ func TestEdgeCase_RapidCreateDelete(t *testing.T) {
 		// Test reverse rebasing
 		rebasedSource := ts.Root.RebasePathUsingSrc(cachedPath)
 		if rebasedSource != sourcePath {
-			t.Errorf("RebasePathUsingSrc failed at iteration %d: got %v, want %v",
+			tu.Failf(
+				t, "RebasePathUsingSrc failed at iteration %d: got %v, want %v",
 				i, rebasedSource, sourcePath)
 			break
 		}

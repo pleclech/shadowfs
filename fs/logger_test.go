@@ -4,6 +4,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	tu "github.com/pleclech/shadowfs/fs/utils/testings"
 )
 
 func TestLogLevel_String(t *testing.T) {
@@ -23,7 +25,8 @@ func TestLogLevel_String(t *testing.T) {
 		t.Run(tt.expected, func(t *testing.T) {
 			result := tt.level.String()
 			if result != tt.expected {
-				t.Errorf("LogLevel(%d).String() = %s, expected %s", tt.level, result, tt.expected)
+				tu.Failf(
+					t, "LogLevel(%d).String() = %s, expected %s", tt.level, result, tt.expected)
 			}
 		})
 	}
@@ -34,11 +37,11 @@ func TestNewLogger(t *testing.T) {
 	logger := NewLogger(LogLevelInfo, os.Stderr)
 
 	if logger == nil {
-		t.Fatal("NewLogger() returned nil")
+		tu.Failf(t, "NewLogger() returned nil")
 	}
 
 	if logger.GetLevel() != LogLevelInfo {
-		t.Errorf("Expected log level %d, got %d", LogLevelInfo, logger.GetLevel())
+		tu.Failf(t, "Expected log level %d, got %d", LogLevelInfo, logger.GetLevel())
 	}
 }
 
@@ -47,19 +50,19 @@ func TestLogger_SetLevel_GetLevel(t *testing.T) {
 
 	// Test initial level
 	if logger.GetLevel() != LogLevelDebug {
-		t.Errorf("Expected initial level %d, got %d", LogLevelDebug, logger.GetLevel())
+		tu.Failf(t, "Expected initial level %d, got %d", LogLevelDebug, logger.GetLevel())
 	}
 
 	// Test setting level
 	logger.SetLevel(LogLevelWarn)
 	if logger.GetLevel() != LogLevelWarn {
-		t.Errorf("Expected level %d after SetLevel, got %d", LogLevelWarn, logger.GetLevel())
+		tu.Failf(t, "Expected level %d after SetLevel, got %d", LogLevelWarn, logger.GetLevel())
 	}
 
 	// Test setting level again
 	logger.SetLevel(LogLevelError)
 	if logger.GetLevel() != LogLevelError {
-		t.Errorf("Expected level %d after second SetLevel, got %d", LogLevelError, logger.GetLevel())
+		tu.Failf(t, "Expected level %d after second SetLevel, got %d", LogLevelError, logger.GetLevel())
 	}
 }
 
@@ -70,10 +73,10 @@ func TestLogger_Debug(t *testing.T) {
 	// These should not panic
 	logger.Debug("test message %s", "value")
 	logger.Debug("another message")
-	
+
 	// Verify level is correct
 	if logger.GetLevel() != LogLevelDebug {
-		t.Errorf("Expected log level %d, got %d", LogLevelDebug, logger.GetLevel())
+		tu.Failf(t, "Expected log level %d, got %d", LogLevelDebug, logger.GetLevel())
 	}
 }
 
@@ -82,10 +85,10 @@ func TestLogger_Info(t *testing.T) {
 
 	logger.Info("info message %d", 42)
 	logger.Info("another info")
-	
+
 	// Verify level is correct
 	if logger.GetLevel() != LogLevelInfo {
-		t.Errorf("Expected log level %d, got %d", LogLevelInfo, logger.GetLevel())
+		tu.Failf(t, "Expected log level %d, got %d", LogLevelInfo, logger.GetLevel())
 	}
 }
 
@@ -94,10 +97,10 @@ func TestLogger_Warn(t *testing.T) {
 
 	logger.Warn("warning message")
 	logger.Warn("another warning")
-	
+
 	// Verify level is correct
 	if logger.GetLevel() != LogLevelWarn {
-		t.Errorf("Expected log level %d, got %d", LogLevelWarn, logger.GetLevel())
+		tu.Failf(t, "Expected log level %d, got %d", LogLevelWarn, logger.GetLevel())
 	}
 }
 
@@ -106,10 +109,10 @@ func TestLogger_Error(t *testing.T) {
 
 	logger.Error("error message %v", "test")
 	logger.Error("another error")
-	
+
 	// Verify level is correct
 	if logger.GetLevel() != LogLevelError {
-		t.Errorf("Expected log level %d, got %d", LogLevelError, logger.GetLevel())
+		tu.Failf(t, "Expected log level %d, got %d", LogLevelError, logger.GetLevel())
 	}
 }
 
@@ -121,10 +124,10 @@ func TestLogger_MessageFiltering(t *testing.T) {
 	logger.Info("info message")
 	logger.Warn("warn message")
 	logger.Error("error message")
-	
+
 	// Verify level filtering works by checking level
 	if logger.GetLevel() != LogLevelWarn {
-		t.Errorf("Expected log level %d, got %d", LogLevelWarn, logger.GetLevel())
+		tu.Failf(t, "Expected log level %d, got %d", LogLevelWarn, logger.GetLevel())
 	}
 }
 
@@ -136,7 +139,7 @@ func TestInitLogger(t *testing.T) {
 
 	level := GetGlobalLevel()
 	if level != LogLevelDebug {
-		t.Errorf("Expected global level %d after InitLogger, got %d", LogLevelDebug, level)
+		tu.Failf(t, "Expected global level %d after InitLogger, got %d", LogLevelDebug, level)
 	}
 }
 
@@ -171,21 +174,21 @@ func TestSetGlobalLevel_GetGlobalLevel(t *testing.T) {
 	// Test initial level
 	level := GetGlobalLevel()
 	if level != LogLevelDebug {
-		t.Errorf("Expected initial global level %d, got %d", LogLevelDebug, level)
+		tu.Failf(t, "Expected initial global level %d, got %d", LogLevelDebug, level)
 	}
 
 	// Test setting level
 	SetGlobalLevel(LogLevelInfo)
 	level = GetGlobalLevel()
 	if level != LogLevelInfo {
-		t.Errorf("Expected global level %d after SetGlobalLevel, got %d", LogLevelInfo, level)
+		tu.Failf(t, "Expected global level %d after SetGlobalLevel, got %d", LogLevelInfo, level)
 	}
 
 	// Test setting level again
 	SetGlobalLevel(LogLevelWarn)
 	level = GetGlobalLevel()
 	if level != LogLevelWarn {
-		t.Errorf("Expected global level %d after second SetGlobalLevel, got %d", LogLevelWarn, level)
+		tu.Failf(t, "Expected global level %d after second SetGlobalLevel, got %d", LogLevelWarn, level)
 	}
 }
 
@@ -199,37 +202,37 @@ func TestGetGlobalLevel_NoLogger(t *testing.T) {
 func TestLogOperation(t *testing.T) {
 	InitLogger(LogLevelDebug)
 	start := time.Now()
-	
+
 	// Test successful operation
 	LogOperation("test_op", "/test/path", start, nil)
-	
+
 	// Test failed operation
 	LogOperation("test_op", "/test/path", start, os.ErrNotExist)
-	
+
 	// No error means it worked
 }
 
 func TestLogFileOperation(t *testing.T) {
 	InitLogger(LogLevelDebug)
-	
+
 	// Test successful operation
 	LogFileOperation("copy", "/source/file", "/cache/file", 1024, nil)
-	
+
 	// Test failed operation
 	LogFileOperation("copy", "/source/file", "/cache/file", 1024, os.ErrPermission)
-	
+
 	// No error means it worked
 }
 
 func TestLogCacheOperation(t *testing.T) {
 	InitLogger(LogLevelDebug)
-	
+
 	// Test cache hit
 	LogCacheOperation("read", "/test/path", true)
-	
+
 	// Test cache miss
 	LogCacheOperation("read", "/test/path", false)
-	
+
 	// No error means it worked
 }
 
@@ -252,7 +255,6 @@ func TestLogger_ConcurrentAccess(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		<-done
 	}
-	
+
 	// If we get here without panic, thread safety worked
 }
-
