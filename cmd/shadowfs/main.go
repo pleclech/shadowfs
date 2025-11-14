@@ -100,6 +100,7 @@ func main() {
 	gitSafetyWindow := flag.Duration("git-safety-window", 5*time.Second, "safety window delay after last write before committing")
 	cacheDir := flag.String("cache-dir", "", "custom cache directory (default: ~/.shadowfs, or $SHADOWFS_CACHE_DIR)")
 	daemon := flag.Bool("daemon", false, "run as daemon in background")
+	allowOther := flag.Bool("allow-other", false, "allow other users to access the mount (required for VS Code compatibility)")
 	flag.Parse()
 
 	if len(flag.Args()) < 2 {
@@ -172,6 +173,15 @@ func main() {
 	}
 	// Take full control of kernel caching to prevent permission issues
 	opts.MountOptions.ExplicitDataCacheControl = true
+
+	// Add default_permissions for better permission handling and error messages
+	opts.MountOptions.Options = append(opts.MountOptions.Options, "default_permissions")
+
+	// Allow other users to access the mount (required for VS Code and other applications)
+	// Note: This requires user_allow_other to be enabled in /etc/fuse.conf for non-root users
+	if *allowOther {
+		opts.MountOptions.AllowOther = true
+	}
 
 	opts.Debug = *debugFuse
 
@@ -294,10 +304,12 @@ Flags for mount:
   --git-safety-window     Safety window delay after last write before committing (default: 5s)
   --cache-dir             Custom cache directory (default: ~/.shadowfs, or $SHADOWFS_CACHE_DIR)
   --daemon                Run as daemon in background
+  --allow-other           Allow other users to access the mount (required for VS Code compatibility)
 
 Examples:
   {binaryname} /mnt/shadow /home/user/source
   {binaryname} --daemon /mnt/shadow /home/user/source
+  {binaryname} --allow-other /mnt/shadow /home/user/source
   {binaryname} list
   {binaryname} info --mount-point /mnt/shadow
   {binaryname} stop --mount-point /mnt/shadow

@@ -263,16 +263,32 @@ func (r *ShadowNode) idFromStat(st *syscall.Stat_t) fs.StableAttr {
 	}
 }
 
-// func (n *ShadowNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
-// 	fmt.Printf("Statfs:%s\n", n.FullPath(false))
-// 	s := syscall.Statfs_t{}
-// 	err := syscall.Statfs(n.FullPath(false), &s)
-// 	if err != nil {
-// 		return fs.ToErrno(err)
-// 	}
-// 	out.FromStatfsT(&s)
-// 	return fs.OK
-// }
+func (n *ShadowNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
+	// Get the mount point path - Statfs should report stats for the mount point itself
+	mountPointPath := n.GetMountPoint()
+	if mountPointPath == "" {
+		// Fallback: try to get from root node
+		if root := n.Root(); root != nil {
+			if ops := root.Operations(); ops != nil {
+				if rootNode, ok := ops.(*ShadowNode); ok {
+					mountPointPath = rootNode.GetMountPoint()
+				}
+			}
+		}
+		if mountPointPath == "" {
+			// Last resort: use the source directory
+			mountPointPath = n.srcDir
+		}
+	}
+
+	s := syscall.Statfs_t{}
+	err := syscall.Statfs(mountPointPath, &s)
+	if err != nil {
+		return fs.ToErrno(err)
+	}
+	out.FromStatfsT(&s)
+	return fs.OK
+}
 
 func (n *ShadowNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	// Validate name parameter to prevent path traversal
