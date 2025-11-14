@@ -2,6 +2,8 @@ package xattr
 
 import (
 	"testing"
+
+	tu "github.com/pleclech/shadowfs/fs/utils/testings"
 )
 
 func TestXAttr_ToBytes_FromBytes(t *testing.T) {
@@ -12,13 +14,13 @@ func TestXAttr_ToBytes_FromBytes(t *testing.T) {
 	// Convert to bytes
 	bytes := ToBytes(&attr)
 	if len(bytes) != Size {
-		t.Errorf("Expected bytes length %d, got %d", Size, len(bytes))
+		tu.Failf(t, "Expected bytes length %d, got %d", Size, len(bytes))
 	}
 
 	// Convert back from bytes
 	attr2 := FromBytes(bytes)
 	if attr2.PathStatus != PathStatusDeleted {
-		t.Errorf("Expected PathStatus %d, got %d", PathStatusDeleted, attr2.PathStatus)
+		tu.Failf(t, "Expected PathStatus %d, got %d", PathStatusDeleted, attr2.PathStatus)
 	}
 }
 
@@ -26,10 +28,10 @@ func TestXAttr_FromBytes_Short(t *testing.T) {
 	// Test with short byte slice
 	shortBytes := []byte{0, 1}
 	attr := FromBytes(shortBytes)
-	
+
 	// Should return zero-initialized struct
 	if attr.PathStatus != PathStatusNone {
-		t.Errorf("Expected PathStatus %d for short bytes, got %d", PathStatusNone, attr.PathStatus)
+		tu.Failf(t, "Expected PathStatus %d for short bytes, got %d", PathStatusNone, attr.PathStatus)
 	}
 }
 
@@ -60,7 +62,8 @@ func TestIsPathDeleted(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := IsPathDeleted(tt.attr)
 			if result != tt.expected {
-				t.Errorf("IsPathDeleted() = %v, expected %v", result, tt.expected)
+				tu.Failf(
+					t, "IsPathDeleted() = %v, expected %v", result, tt.expected)
 			}
 		})
 	}

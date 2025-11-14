@@ -88,6 +88,7 @@ func main() {
 
 	// Parse flags for mount command
 	debug := flag.Bool("debug", false, "print debug data")
+	debugFuse := flag.Bool("debug-fuse", false, "print FUSE debug data")
 	autoGit := flag.Bool("auto-git", false, "enable automatic Git versioning")
 	gitIdleTimeout := flag.Duration("git-idle-timeout", 30*time.Second, "idle timeout for auto-commits")
 	gitSafetyWindow := flag.Duration("git-safety-window", 5*time.Second, "safety window delay after last write before committing")
@@ -131,6 +132,10 @@ func main() {
 		logLevel = shadowfs.LogLevelDebug
 	}
 
+	if os.Getenv("SHADOWFS_DEBUG_FUSE") == "1" {
+		*debugFuse = true
+	}
+
 	shadowfs.InitLogger(logLevel)
 
 	mountPoint := flag.Arg(0)
@@ -162,7 +167,7 @@ func main() {
 	// Take full control of kernel caching to prevent permission issues
 	opts.MountOptions.ExplicitDataCacheControl = true
 
-	opts.Debug = *debug
+	opts.Debug = *debugFuse
 
 	server, err := fs.Mount(root.GetMountPoint(), root, opts)
 	if err != nil {

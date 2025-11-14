@@ -1,6 +1,7 @@
-package testing
+package testings
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"os/exec"
@@ -190,6 +191,21 @@ func FailFIndent(t *testing.T, level int, format string, args ...interface{}) {
 	t.Helper()
 	msg := fmt.Sprintf(format, args...)
 	FailIndent(t, level, msg)
+}
+
+// Error logs an error but does not stop test execution
+// Use this when you want to report an error but continue the test
+func Error(t *testing.T, message string) {
+	t.Helper()
+	t.Logf("\033[31m✗\033[0m error: %s", message)
+	t.Error(message)
+}
+
+// Errorf logs a formatted error but does not stop test execution
+// Use this when you want to report an error but continue the test
+func Errorf(t *testing.T, format string, args ...interface{}) {
+	t.Helper()
+	Error(t, fmt.Sprintf(format, args...))
 }
 
 func Success(t *testing.T, message string) {
@@ -401,6 +417,95 @@ func ReadFileContent(path string, t *testing.T) string {
 	return string(content)
 }
 
+// GetEntryNames extracts entry names from a slice of directory entries
+// Useful for debugging and logging directory contents
+func GetEntryNames(entries []os.DirEntry) []string {
+	names := make([]string, len(entries))
+	for i, entry := range entries {
+		names[i] = entry.Name()
+	}
+	return names
+}
+
+// WaitForFilesystemReady waits for the filesystem to be ready after starting
+// If duration is 0, defaults to 100ms
+func WaitForFilesystemReady(duration time.Duration) {
+	if duration == 0 {
+		duration = 100 * time.Millisecond
+	}
+	time.Sleep(duration)
+}
+
+// GetCachePath computes the cache path for a given mount point, source directory, and relative path
+// Uses SHA256 hash pattern: ~/.shadowfs/{hash}/.root/{relPath}
+func GetCachePath(mountPoint, srcDir, relPath string) string {
+	homeDir, _ := os.UserHomeDir()
+	mountID := fmt.Sprintf("%x", sha256.Sum256([]byte(mountPoint+srcDir)))
+	cacheRoot := filepath.Join(homeDir, ".shadowfs", mountID, ".root")
+	return filepath.Join(cacheRoot, relPath)
+}
+
+// CreateSourceFiles creates multiple source files in the source directory
+// Automatically creates parent directories as needed
+func CreateSourceFiles(srcDir string, files map[string]string, t *testing.T, levels ...int) {
+	t.Helper()
+	level := getLevel(levels...)
+	InfoFIndent(t, level, "creating %d source files", len(files))
+	for path, content := range files {
+		fullPath := filepath.Join(srcDir, path)
+		dir := filepath.Dir(fullPath)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			FailFIndent(t, level, "failed to create directory %s: %v", dir, err)
+		}
+		if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
+			FailFIndent(t, level, "failed to create file %s: %v", fullPath, err)
+		}
+	}
+	SuccessFIndent(t, level, "")
+}
+
+// AssertDirectoryContains checks that a directory contains at least the expected entries
+// Does not require exact match - directory can have more entries
+func AssertDirectoryContains(dir string, expected []string, t *testing.T, levels ...int) {
+	t.Helper()
+	level := getLevel(levels...)
+	InfoFIndent(t, level, "directory %s should contain entries %v", dir, expected)
+	entries := ListDir(dir, t)
+	entryMap := make(map[string]bool)
+	for _, entry := range entries {
+		entryMap[entry.Name()] = true
+	}
+	for _, expectedName := range expected {
+		if !entryMap[expectedName] {
+			FailFIndent(t, level, "directory %s should contain entry %s, but does not", dir, expectedName)
+		}
+	}
+	SuccessFIndent(t, level, "")
+}
+
+// AssertDirectoryHasExactEntries checks that a directory has exactly the expected entries
+// Directory must have exactly the same entries, no more, no less
+func AssertDirectoryHasExactEntries(dir string, expected []string, t *testing.T, levels ...int) {
+	t.Helper()
+	level := getLevel(levels...)
+	InfoFIndent(t, level, "directory %s should have exactly %d entries", dir, len(expected))
+	entries := ListDir(dir, t)
+	if len(entries) != len(expected) {
+		entryNames := GetEntryNames(entries)
+		FailFIndent(t, level, "directory %s should have %d entries, but has %d. Expected: %v, Got: %v", dir, len(expected), len(entries), expected, entryNames)
+	}
+	entryMap := make(map[string]bool)
+	for _, entry := range entries {
+		entryMap[entry.Name()] = true
+	}
+	for _, expectedName := range expected {
+		if !entryMap[expectedName] {
+			FailFIndent(t, level, "directory %s should have entry %s, but does not", dir, expectedName)
+		}
+	}
+	SuccessFIndent(t, level, "")
+}
+
 // ============================================================================
 // Filesystem Binary Management Utilities
 // ============================================================================
@@ -520,14 +625,20 @@ func (bm *BinaryManager) Cleanup() {
 	}
 }
 
-// testLogWriter wraps t.Logf to implement io.Writer
-type testLogWriter struct {
+// TestLogWriter wraps t.Logf to implement io.Writer
+// Exported for use in test files that need custom command execution
+type TestLogWriter struct {
 	t      *testing.T
 	prefix string
 	buf    []byte
 }
 
-func (w *testLogWriter) Write(p []byte) (n int, err error) {
+// NewTestLogWriter creates a new TestLogWriter for redirecting command output to test logs
+func NewTestLogWriter(t *testing.T, prefix string) *TestLogWriter {
+	return &TestLogWriter{t: t, prefix: prefix}
+}
+
+func (w *TestLogWriter) Write(p []byte) (n int, err error) {
 	w.buf = append(w.buf, p...)
 	for {
 		idx := strings.IndexByte(string(w.buf), '\n')
@@ -536,14 +647,14 @@ func (w *testLogWriter) Write(p []byte) (n int, err error) {
 		}
 		line := strings.TrimRight(string(w.buf[:idx]), "\r\n")
 		if line != "" {
-			w.t.Logf("%s%s", w.prefix, line)
+			Debugf(w.t, "%s%s", w.prefix, line)
 		}
 		w.buf = w.buf[idx+1:]
 	}
 	return len(p), nil
 }
 
-func (w *testLogWriter) Close() error {
+func (w *TestLogWriter) Close() error {
 	if len(w.buf) > 0 {
 		line := strings.TrimRight(string(w.buf), "\r\n")
 		if line != "" {
@@ -565,7 +676,17 @@ func (bm *BinaryManager) RunBinary(t *testing.T, mountPoint, srcDir string, cach
 		}
 	}
 
-	args := []string{"--debug"}
+	args := []string{}
+
+	logLevel := strings.ToLower(os.Getenv("SHADOWFS_LOG_LEVEL"))
+	if logLevel == "debug" {
+		args = append(args, "--debug")
+	}
+
+	if os.Getenv("SHADOWFS_DEBUG_FUSE") == "1" {
+		args = append(args, "--debug-fuse")
+	}
+
 	if len(cacheDir) > 0 && cacheDir[0] != "" {
 		args = append(args, "--cache-dir", cacheDir[0])
 	}
@@ -573,8 +694,8 @@ func (bm *BinaryManager) RunBinary(t *testing.T, mountPoint, srcDir string, cach
 
 	cmd := exec.Command(bm.binaryPath, args...)
 
-	stdoutWriter := &testLogWriter{t: t, prefix: "[stdout] "}
-	stderrWriter := &testLogWriter{t: t, prefix: "[stderr] "}
+	stdoutWriter := NewTestLogWriter(t, "[stdout] ")
+	stderrWriter := NewTestLogWriter(t, "[stderr] ")
 	cmd.Stdout = stdoutWriter
 	cmd.Stderr = stderrWriter
 
@@ -607,6 +728,33 @@ func GracefulShutdown(cmd *exec.Cmd, mountPoint string, t *testing.T) {
 
 	// Unmount after process exits
 	exec.Command("umount", mountPoint).Run()
+}
+
+// SetupFilesystemWithCache creates a standardized filesystem setup for tests
+// Returns BinaryManager, mountPoint, srcDir, and cmd
+// Optionally accepts a cache directory - if not provided, uses BinaryManager's default cache
+// Automatically waits for filesystem to be ready
+func SetupFilesystemWithCache(t *testing.T, binaryPath string, cacheDir ...string) (*BinaryManager, string, string, *exec.Cmd) {
+	t.Helper()
+	testMgr := NewBinaryManager(t, binaryPath)
+	mountPoint := testMgr.MntDir()
+	srcDir := testMgr.SrcDir()
+
+	var cache string
+	if len(cacheDir) > 0 && cacheDir[0] != "" {
+		cache = cacheDir[0]
+	} else {
+		cache = testMgr.CacheDir()
+	}
+
+	cmd, err := testMgr.RunBinary(t, mountPoint, srcDir, cache)
+	if err != nil {
+		t.Fatalf("Failed to start filesystem: %v", err)
+	}
+
+	WaitForFilesystemReady(0) // Use default 100ms
+
+	return testMgr, mountPoint, srcDir, cmd
 }
 
 // SetupTestMain sets up TestMain with binary management
