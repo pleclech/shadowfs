@@ -42,6 +42,7 @@ A FUSE-based versioned overlay filesystem that provides versioning and caching c
 - **Mount Status**: List and inspect active mounts with detailed statistics
 - **Copy-on-Write**: Files copied to cache only on first write for efficiency
 - **Session Persistence**: Maintains cache across mount/unmount cycles
+- **Reliable Operations**: Robust file and directory operations with proper cache independence and edge case handling
 - **Performance Optimized**: Buffer pools, async operations, no reflection overhead
 - **Security**: Path validation and traversal protection
 - **Linux Optimized**: Built specifically for Linux with syscall optimizations
@@ -154,7 +155,7 @@ mkdir -p /home/user/source /home/user/mount
 sudo ./shadowfs /home/user/mount /home/user/source
 
 # Or mount as daemon (background mode)
-sudo ./shadowfs -daemon /home/user/mount /home/user/source
+sudo ./shadowfs --daemon /home/user/mount /home/user/source
 
 # Use the filesystem normally
 ls /home/user/mount
@@ -187,7 +188,7 @@ This section demonstrates the complete workflow from mounting to syncing changes
 # ============================================
 
 # Mount the filesystem with Git auto-versioning enabled
-sudo ./shadowfs -auto-git /mnt/overlay /path/to/source
+sudo ./shadowfs --auto-git /mnt/overlay /path/to/source
 
 # Make changes in the cache (source directory is untouched)
 vim /mnt/overlay/file1.txt
@@ -289,7 +290,7 @@ sudo umount /mnt/overlay
 
 ### Workflow Summary
 
-1. **Mount**: `sudo ./shadowfs -auto-git /mnt/overlay /path/to/source`
+1. **Mount**: `sudo ./shadowfs --auto-git /mnt/overlay /path/to/source`
    - Source directory is read-only and protected
    - All changes go to cache layer
    - Git auto-versioning tracks all changes
@@ -446,10 +447,10 @@ Run shadowfs in the background for long-running mounts:
 
 ```bash
 # Start filesystem as daemon
-sudo ./shadowfs -daemon /mnt/overlay /path/to/source
+sudo ./shadowfs --daemon /mnt/overlay /path/to/source
 
 # Start with Git auto-versioning enabled
-sudo ./shadowfs -daemon -auto-git /mnt/overlay /path/to/source
+sudo ./shadowfs --daemon --auto-git /mnt/overlay /path/to/source
 
 # Daemon runs in background - terminal is free
 # PID file is stored in ~/.shadowfs/daemons/<mount-id>.pid
@@ -483,13 +484,13 @@ Enable automatic Git versioning to track all file changes:
 
 ```bash
 # Enable git autocommit with default 30 second idle timeout
-sudo ./shadowfs -auto-git /home/user/mount /home/user/source
+sudo ./shadowfs --auto-git /home/user/mount /home/user/source
 
 # Customize idle timeout (commits after 60 seconds of inactivity)
-sudo ./shadowfs -auto-git -git-idle-timeout=60s /home/user/mount /home/user/source
+sudo ./shadowfs --auto-git --git-idle-timeout=60s /home/user/mount /home/user/source
 
 # Enable debug output
-sudo ./shadowfs -debug -auto-git /home/user/mount /home/user/source
+sudo ./shadowfs --debug --auto-git /home/user/mount /home/user/source
 ```
 
 **Git Auto-Versioning Features:**
@@ -540,7 +541,7 @@ The overlay filesystem is designed with cache independence as a core principle. 
 
 ### Cache Structure
 
-The filesystem stores cached files in `~/.shadowfs/<mount-id>/` by default, or in the custom cache directory if specified via `-cache-dir` flag or `SHADOWFS_CACHE_DIR` environment variable:
+The filesystem stores cached files in `~/.shadowfs/<mount-id>/` by default, or in the custom cache directory if specified via `--cache-dir` flag or `SHADOWFS_CACHE_DIR` environment variable:
 
 ```
 <cache-base-dir>/<sha256-hash>/
@@ -557,14 +558,14 @@ The filesystem stores cached files in `~/.shadowfs/<mount-id>/` by default, or i
 
 **Cache Directory Configuration:**
 - **Default**: `~/.shadowfs/` (in user's home directory)
-- **Custom**: Use `-cache-dir` flag or `SHADOWFS_CACHE_DIR` environment variable
+- **Custom**: Use `--cache-dir` flag or `SHADOWFS_CACHE_DIR` environment variable
 - **Priority**: Command-line flag > Environment variable > Default
 - Cache directory is created automatically if it doesn't exist
 - Must be writable and on a filesystem supporting extended attributes
 
 **Git Repository:**
 - Located in `.gitofs/` directory (not `.git` to avoid conflicts)
-- Automatically initialized when `-auto-git` flag is used
+- Automatically initialized when `--auto-git` flag is used
 - Tracks all changes in the cache layer
 - Commits are created automatically after idle periods
 - All pending changes are committed on unmount
@@ -610,12 +611,12 @@ git add + git commit (background goroutine)
 ### Configuration
 
 **Command-Line Flags:**
-- `-auto-git`: Enable automatic Git versioning
-- `-git-idle-timeout`: Set idle timeout before commit (default: 30s)
-- `-git-safety-window`: Safety window delay after last write before committing (default: 5s)
-- `-cache-dir`: Custom cache directory (overrides `SHADOWFS_CACHE_DIR`)
-- `-daemon`: Run filesystem as daemon in background
-- `-debug`: Enable debug output for troubleshooting
+- `--auto-git`: Enable automatic Git versioning
+- `--git-idle-timeout`: Set idle timeout before commit (default: 30s)
+- `--git-safety-window`: Safety window delay after last write before committing (default: 5s)
+- `--cache-dir`: Custom cache directory (overrides `SHADOWFS_CACHE_DIR`)
+- `--daemon`: Run filesystem as daemon in background
+- `--debug`: Enable debug output for troubleshooting
 
 **Git Repository:**
 - Created automatically in `.gitofs/` directory
@@ -627,7 +628,7 @@ git add + git commit (background goroutine)
 
 ```bash
 # Mount with git autocommit
-sudo ./shadowfs -auto-git /mnt/overlay /path/to/source
+sudo ./shadowfs --auto-git /mnt/overlay /path/to/source
 
 # Edit files normally
 vim /mnt/overlay/file1.txt
@@ -788,7 +789,7 @@ Each backup is stored in a directory named with format: `{timestamp}-{mount-id}`
 
 ```bash
 # 1. Mount filesystem
-sudo ./shadowfs -auto-git /mnt/overlay /path/to/source
+sudo ./shadowfs --auto-git /mnt/overlay /path/to/source
 
 # 2. Make changes in cache
 vim /mnt/overlay/file1.txt
@@ -1007,16 +1008,16 @@ ShadowFS supports running as a background daemon process, allowing you to manage
 
 ```bash
 # Start filesystem as daemon
-sudo ./shadowfs -daemon /mnt/overlay /path/to/source
+sudo ./shadowfs --daemon /mnt/overlay /path/to/source
 
 # Start with Git auto-versioning enabled
-sudo ./shadowfs -daemon -auto-git /mnt/overlay /path/to/source
+sudo ./shadowfs --daemon --auto-git /mnt/overlay /path/to/source
 
 # Start with custom cache directory
-sudo ./shadowfs -daemon -cache-dir /custom/cache /mnt/overlay /path/to/source
+sudo ./shadowfs --daemon --cache-dir /custom/cache /mnt/overlay /path/to/source
 ```
 
-When started with `-daemon` flag:
+When started with `--daemon` flag:
 - Process forks and runs in background
 - Parent process exits immediately
 - PID file is created in `~/.shadowfs/daemons/<mount-id>.pid`
@@ -1333,8 +1334,17 @@ go build -o shadowfs ./cmd/shadowfs
 # Build with race detection
 go build -race -o shadowfs ./cmd/shadowfs
 
-# Build for production
+# Build for production (minimal binary size)
 go build -ldflags="-s -w" -o shadowfs ./cmd/shadowfs
+
+# Build with version information (release)
+VERSION=$(git describe --tags --always --dirty)
+COMMIT=$(git rev-parse --short HEAD)
+DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+go build -ldflags="-s -w -X github.com/pleclech/shadowfs/cmd/shadowfs.Version=$VERSION -X github.com/pleclech/shadowfs/cmd/shadowfs.Commit=$COMMIT -X github.com/pleclech/shadowfs/cmd/shadowfs.BuildDate=$DATE" -o shadowfs ./cmd/shadowfs
+
+# Check version
+./shadowfs --version
 ```
 
 ### Releases
@@ -1420,6 +1430,27 @@ Each release includes:
 - SHA256 checksums file
 - Release notes with changelog
 
+#### Version Information
+
+The `--version` flag displays version information:
+
+```bash
+shadowfs --version
+# Output:
+# shadowfs version v1.0.0
+# Commit: abc1234
+# Built: 2024-01-15T10:30:00Z
+```
+
+Version information is set at build time via ldflags. When built with GoReleaser or GitHub Actions, the version is automatically injected from Git tags. For manual builds, you can set version information:
+
+```bash
+VERSION=$(git describe --tags --always --dirty)
+COMMIT=$(git rev-parse --short HEAD)
+DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+go build -ldflags="-X github.com/pleclech/shadowfs/cmd/shadowfs.Version=$VERSION -X github.com/pleclech/shadowfs/cmd/shadowfs.Commit=$COMMIT -X github.com/pleclech/shadowfs/cmd/shadowfs.BuildDate=$DATE" -o shadowfs ./cmd/shadowfs
+```
+
 ### Testing
 
 The project includes comprehensive test coverage:
@@ -1504,7 +1535,7 @@ go tool cover -html=coverage.out
 
 ### Environment Variables
 
-- `SHADOWFS_CACHE_DIR`: Base directory for cache storage (overridden by `-cache-dir` flag if set)
+- `SHADOWFS_CACHE_DIR`: Base directory for cache storage (overridden by `--cache-dir` flag if set)
 - `HOME`: User home directory (for default cache location `~/.shadowfs`)
 - `TMPDIR`: Temporary directory location
 
@@ -1515,19 +1546,22 @@ go tool cover -html=coverage.out
 sudo ./shadowfs <mountpoint> <srcdir>
 
 # Enable Git auto-versioning
-sudo ./shadowfs -auto-git <mountpoint> <srcdir>
+sudo ./shadowfs --auto-git <mountpoint> <srcdir>
 
 # Customize git idle timeout
-sudo ./shadowfs -auto-git -git-idle-timeout=60s <mountpoint> <srcdir>
+sudo ./shadowfs --auto-git --git-idle-timeout=60s <mountpoint> <srcdir>
 
 # Enable debug output
-sudo ./shadowfs -debug <mountpoint> <srcdir>
+sudo ./shadowfs --debug <mountpoint> <srcdir>
 
 # Combine options
-sudo ./shadowfs -debug -auto-git -git-idle-timeout=45s <mountpoint> <srcdir>
+sudo ./shadowfs --debug --auto-git --git-idle-timeout=45s <mountpoint> <srcdir>
 
 # Use custom cache directory
-sudo ./shadowfs -cache-dir=/mnt/fast-ssd/cache <mountpoint> <srcdir>
+sudo ./shadowfs --cache-dir=/mnt/fast-ssd/cache <mountpoint> <srcdir>
+
+# Mount with allow_other for VS Code compatibility (requires user_allow_other in /etc/fuse.conf)
+sudo ./shadowfs --allow-other <mountpoint> <srcdir>
 
 # Use environment variable for cache directory
 export SHADOWFS_CACHE_DIR=/mnt/fast-ssd/cache
@@ -1535,17 +1569,19 @@ sudo ./shadowfs <mountpoint> <srcdir>
 ```
 
 **Available Flags:**
-- `-auto-git`: Enable automatic Git versioning
-- `-git-idle-timeout`: Idle timeout before commit (e.g., `30s`, `1m`, `2m30s`, default: `30s`)
-- `-git-safety-window`: Safety window delay after last write before committing (e.g., `5s`, `10s`, default: `5s`)
-- `-debug`: Enable ShadowFS debug logging (filesystem-specific debug output)
-- `-debug-fuse`: Enable FUSE library debug output (low-level FUSE operation logging)
-- `-cache-dir`: Custom cache directory (default: `~/.shadowfs`, or `$SHADOWFS_CACHE_DIR` environment variable)
+- `-v, --version`: Print version information and exit
+- `--auto-git`: Enable automatic Git versioning
+- `--git-idle-timeout`: Idle timeout before commit (e.g., `30s`, `1m`, `2m30s`, default: `30s`)
+- `--git-safety-window`: Safety window delay after last write before committing (e.g., `5s`, `10s`, default: `5s`)
+- `--debug`: Enable ShadowFS debug logging (filesystem-specific debug output)
+- `--debug-fuse`: Enable FUSE library debug output (low-level FUSE operation logging)
+- `--cache-dir`: Custom cache directory (default: `~/.shadowfs`, or `$SHADOWFS_CACHE_DIR` environment variable)
+- `--allow-other`: Allow other users to access the mount (required for VS Code compatibility, requires `user_allow_other` in `/etc/fuse.conf`)
 
 **Environment Variables:**
-- `SHADOWFS_CACHE_DIR`: Base directory for cache storage (overridden by `-cache-dir` flag)
+- `SHADOWFS_CACHE_DIR`: Base directory for cache storage (overridden by `--cache-dir` flag)
 - `SHADOWFS_LOG_LEVEL`: Set logging level (`debug`, `info`, `warn`, `error`, default: `info`)
-- `SHADOWFS_DEBUG_FUSE`: Enable FUSE debug output (set to `1` to enable, equivalent to `-debug-fuse` flag)
+- `SHADOWFS_DEBUG_FUSE`: Enable FUSE debug output (set to `1` to enable, equivalent to `--debug-fuse` flag)
 - `HOME`: User home directory (for default cache location)
 - `TMPDIR`: Temporary directory location
 
@@ -1554,12 +1590,28 @@ sudo ./shadowfs <mountpoint> <srcdir>
 The filesystem supports standard FUSE mount options:
 
 ```bash
-# Allow other users to access
-sudo ./shadowfs -o allow_other /mount /source
+# Allow other users to access (required for VS Code compatibility)
+# Flags must come BEFORE positional arguments
+sudo ./shadowfs --allow-other /mount /source
 
-# Set default permissions
-sudo ./shadowfs -o default_permissions /mount /source
+# Note: --allow-other requirements:
+# - Mounting as root (sudo): /etc/fuse.conf modification NOT required
+# - Mounting as regular user: Must enable user_allow_other in /etc/fuse.conf
 ```
+
+**Important**: The `--allow-other` option requirements depend on how you mount:
+
+- **Mounting as root (sudo)**: `/etc/fuse.conf` modification is NOT required. Root can use `allow_other` directly.
+- **Mounting as regular user**: `/etc/fuse.conf` modification IS required. To enable it:
+  1. Edit `/etc/fuse.conf` with sudo privileges
+  2. Uncomment the line: `user_allow_other`
+  3. Save and exit
+
+**Flag Positioning**: Flags must come BEFORE positional arguments:
+- ✅ Correct: `shadowfs --allow-other /mount /source`
+- ❌ Wrong: `shadowfs /mount /source --allow-other`
+
+This option is required for VS Code and other applications that need to access the mount from different user contexts.
 
 ## API Reference
 
@@ -1731,10 +1783,10 @@ sudo modprobe fuse
 
 ```bash
 # Use debug mode to identify bottlenecks (ShadowFS logging)
-sudo ./shadowfs -debug /mount /source
+sudo ./shadowfs --debug /mount /source
 
 # Enable FUSE debug output (low-level FUSE operations)
-sudo ./shadowfs -debug-fuse /mount /source
+sudo ./shadowfs --debug-fuse /mount /source
 
 # Or use environment variable
 SHADOWFS_DEBUG_FUSE=1 sudo ./shadowfs /mount /source
@@ -1745,6 +1797,39 @@ du -sh ~/.shadowfs/
 # Check git repository size (if using auto-versioning)
 du -sh ~/.shadowfs/*/.gitofs/.git/
 ```
+
+#### VS Code Compatibility Issues
+
+VS Code fails to launch from FUSE-mounted directories (including shadowfs) with the error:
+```
+/mnt/c/Users/.../Code.exe: Invalid argument
+```
+
+This is a known VS Code limitation with FUSE filesystems. To fix:
+
+1. **If mounting as regular user, enable `user_allow_other` in FUSE configuration:**
+   ```bash
+   sudo nano /etc/fuse.conf
+   # Uncomment the line: user_allow_other
+   ```
+   **Note**: If mounting as root (sudo), this step is NOT required.
+
+2. **Mount shadowfs with `--allow-other` flag (flags must come BEFORE positional arguments):**
+   ```bash
+   # Correct: flags before positional arguments
+   sudo ./shadowfs --allow-other /mount /source
+   
+   # Wrong: flags after positional arguments (won't work)
+   sudo ./shadowfs /mount /source --allow-other
+   ```
+
+3. **Launch VS Code from the mount:**
+   ```bash
+   cd /mount/project
+   code .
+   ```
+
+**Note**: The `--allow-other` option has security implications as it allows other users to access the mount. Only use it when necessary and ensure your system is properly secured.
 
 #### Git Auto-Versioning Issues
 
@@ -1764,7 +1849,7 @@ git --git-dir=.gitofs/.git log --oneline
 
 # If commits aren't happening, check idle timeout
 # Increase timeout if files are being edited frequently
-sudo ./shadowfs -auto-git -git-idle-timeout=60s /mount /source
+sudo ./shadowfs --auto-git --git-idle-timeout=60s /mount /source
 ```
 
 #### Xattr-Related Errors
@@ -1817,13 +1902,13 @@ Enable detailed logging:
 
 ```bash
 # Enable ShadowFS debug logging (filesystem-specific)
-sudo ./shadowfs -debug /mount /source
+sudo ./shadowfs --debug /mount /source
 
 # Enable FUSE library debug output (low-level FUSE operations)
-sudo ./shadowfs -debug-fuse /mount /source
+sudo ./shadowfs --debug-fuse /mount /source
 
 # Enable both ShadowFS and FUSE debug output
-sudo ./shadowfs -debug -debug-fuse /mount /source
+sudo ./shadowfs --debug --debug-fuse /mount /source
 
 # Enable FUSE debug via environment variable
 SHADOWFS_DEBUG_FUSE=1 sudo ./shadowfs /mount /source
@@ -1833,10 +1918,10 @@ SHADOWFS_LOG_LEVEL=debug sudo ./shadowfs /mount /source
 ```
 
 **Note**: 
-- The `-debug` flag enables ShadowFS's own debug logging (filesystem operations, path resolution, etc.)
-- The `-debug-fuse` flag enables the go-fuse library's internal debug output (low-level FUSE operations like GETXATTR, LOOKUP, etc.)
+- The `--debug` flag enables ShadowFS's own debug logging (filesystem operations, path resolution, etc.)
+- The `--debug-fuse` flag enables the go-fuse library's internal debug output (low-level FUSE operations like GETXATTR, LOOKUP, etc.)
 - You can use both flags together for comprehensive debugging
-- The `SHADOWFS_DEBUG_FUSE` environment variable can be used instead of the `-debug-fuse` flag
+- The `SHADOWFS_DEBUG_FUSE` environment variable can be used instead of the `--debug-fuse` flag
 
 ## Contributing
 
@@ -1879,36 +1964,7 @@ Contact: Twitter [@pleclech](https://twitter.com/pleclech)
 
 ## Changelog
 
-### v1.0.0 (Latest) - "First Light"
-
-**Initial Release:**
-- Basic overlay filesystem functionality
-- Comprehensive test suite
-- Linux support with FUSE
-
-**Git Auto-Versioning:**
-- Automatic Git versioning with idle-based commits
-- Batch commits for multiple files edited together
-- Commit-on-unmount to prevent data loss
-- Change detection to skip commits for unchanged files
-- Async git operations (non-blocking)
-
-**Performance:**
-- Buffer pools for file operations (reduces allocations)
-- Optimized path operations
-- Async git operations don't block filesystem
-
-**Security:**
-- Path validation and traversal protection
-- Comprehensive error handling
-- Safe resource management
-
-**Features:**
-- Daemon mode for background operation
-- Mount status and information commands
-- Sync to source with automatic backups
-- Version management (list, diff, restore)
-- Backup management and rollback capabilities
+See [CHANGELOG.md](CHANGELOG.md) for a detailed history of changes, improvements, and bug fixes.
 
 ## Support
 
