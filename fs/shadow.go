@@ -274,120 +274,6 @@ func (r *ShadowNode) idFromStat(st *syscall.Stat_t) fs.StableAttr {
 // 	return fs.OK
 // }
 
-// resolveSourcePath resolves a mount point path to its original source path
-// using memory-first approach: checks RenameTracker first, falls back to xattr if not found.
-// Returns the resolved source path and whether any parent is independent (CacheIndependent = true).
-// If any parent is independent, we should not check source for children.
-// func (n *ShadowNode) resolveSourcePath(mountPointPath string) (resolvedSourcePath string, isIndependent bool) {
-// 	// Normalize path
-// 	mountPointPath = strings.Trim(mountPointPath, "/")
-// 	if mountPointPath == "" {
-// 		// Root path
-// 		return n.srcDir, false
-// 	}
-
-// 	// Step 1: Check memory tracker first (fast path)
-// 	if n.renameTracker != nil {
-// 		resolved, independent, found := n.renameTracker.ResolveRenamedPath(mountPointPath)
-// 		if strings.Contains(mountPointPath, "baz") {
-// 			fmt.Printf("[DEBUG resolveSourcePath] mountPointPath=%s, resolved=%s, independent=%v, found=%v\n", mountPointPath, resolved, independent, found)
-// 		}
-// 		if found {
-// 			if independent {
-// 				// Path is independent - return mount point path, don't check source
-// 				return filepath.Join(n.srcDir, mountPointPath), true
-// 			}
-// 			// Found in memory - return resolved path
-// 			return filepath.Join(n.srcDir, resolved), false
-// 		}
-// 	}
-
-// 	// Step 2: Fallback to xattr-based resolution (slow path, but populates memory)
-// 	if n.xattrMgr == nil {
-// 		// No xattr manager - return path as-is
-// 		return filepath.Join(n.srcDir, mountPointPath), false
-// 	}
-
-// 	// Split path into components
-// 	parts := strings.Split(mountPointPath, "/")
-// 	if len(parts) == 0 {
-// 		return n.srcDir, false
-// 	}
-
-// 	// Walk up the path, checking each parent directory's xattr
-// 	// Start from root and work down to find the longest matching renamed prefix
-// 	resolvedPath := mountPointPath
-// 	currentPath := ""
-
-// 	for i := 0; i < len(parts); i++ {
-// 		if currentPath == "" {
-// 			currentPath = parts[i]
-// 		} else {
-// 			currentPath = filepath.Join(currentPath, parts[i])
-// 		}
-
-// 		// Convert mount point path to cache path to check xattr
-// 		sourcePathForCache := filepath.Join(n.srcDir, currentPath)
-// 		cachePath := n.cacheMgr.ResolveCachePath(sourcePathForCache)
-
-// 		// Check if this path exists in cache and has xattr
-// 		var st syscall.Stat_t
-// 		if err := syscall.Lstat(cachePath, &st); err == nil {
-// 			// Path exists in cache - check xattr
-// 			attr, exists, errno := n.xattrMgr.GetStatus(cachePath)
-// 			if errno == 0 && exists && attr != nil {
-// 				// Check if this parent is independent
-// 				if attr.CacheIndependent {
-// 					// Parent is independent - stop resolution, don't check source
-// 					isIndependent = true
-// 					// Populate memory tracker with independent flag
-// 					if n.renameTracker != nil {
-// 						currentPathNormalized := strings.Trim(currentPath, "/")
-// 						// Store as independent in memory (even if not renamed)
-// 						n.renameTracker.StoreRenameMapping(currentPathNormalized, currentPathNormalized, true)
-// 					}
-// 					// Return current mount point path (no resolution needed)
-// 					return filepath.Join(n.srcDir, mountPointPath), true
-// 				}
-
-// 				// Check if this path was renamed
-// 				renamedFrom := attr.GetRenamedFromPath()
-// 				if renamedFrom != "" {
-// 					// This path was renamed - replace the prefix
-// 					// renamedFrom is the original source path (e.g., "foo/bar")
-// 					// currentPath is the current mount point path (e.g., "foo/baz")
-// 					// Replace currentPath prefix in mountPointPath with renamedFrom
-// 					renamedFromNormalized := strings.Trim(renamedFrom, "/")
-// 					currentPathNormalized := strings.Trim(currentPath, "/")
-
-// 					// Check if mountPointPath starts with currentPath
-// 					if mountPointPath == currentPathNormalized || strings.HasPrefix(mountPointPath, currentPathNormalized+"/") {
-// 						// Replace currentPath prefix with renamedFrom
-// 						suffix := strings.TrimPrefix(mountPointPath, currentPathNormalized)
-// 						suffix = strings.TrimPrefix(suffix, "/")
-// 						if suffix == "" {
-// 							resolvedPath = renamedFromNormalized
-// 						} else {
-// 							resolvedPath = filepath.Join(renamedFromNormalized, suffix)
-// 						}
-// 						// Populate in-memory tracker for future fast lookups
-// 						if n.renameTracker != nil {
-// 							// Store mapping: original source path -> current mount point path
-// 							n.renameTracker.StoreRenameMapping(renamedFromNormalized, currentPathNormalized, false)
-// 						}
-// 						// Update currentPath to use resolved path for next iteration (for nested renames)
-// 						currentPath = resolvedPath
-// 					}
-// 				}
-// 			}
-// 		}
-// 	}
-
-// 	// Reconstruct resolved source path
-// 	resolvedSourcePath = filepath.Join(n.srcDir, resolvedPath)
-// 	return resolvedSourcePath, isIndependent
-// }
-
 func (n *ShadowNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	// Validate name parameter to prevent path traversal
 	if !utils.ValidateName(name) {
@@ -407,14 +293,6 @@ func (n *ShadowNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut
 			parentPathRelative = n.Path(root)
 		}
 	}()
-
-	// Debug: log all lookups
-	if name == "hello" || strings.Contains(parentPathRelative, "baz") || name == "baz" {
-		fmt.Printf("[DEBUG Lookup START] name=%s, parentPathRelative=%s, renameTracker=%p\n", name, parentPathRelative, n.renameTracker)
-		if n.renameTracker != nil {
-			fmt.Printf("[DEBUG Lookup START] Trie contents:\n%s\n", n.renameTracker.DumpTrie())
-		}
-	}
 
 	// Use clean lookup operation per Phase 1.2
 	if n.lookupOp == nil {
@@ -974,36 +852,27 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 	var resolveErrno syscall.Errno
 	var p string // Will be set to either cachePath or sourcePath depending on where file exists
 
-	fmt.Printf("[DEBUG Open] mountPointPath=%s, forceCache=%v\n", mountPointPath, forceCache)
-
 	if forceCache {
 		// For write operations, use ResolveForWrite
 		cachePath, sourcePath, resolveErrno = n.pathResolver.ResolveForWrite(mountPointPath)
 		if resolveErrno != 0 {
-			fmt.Printf("[DEBUG Open] ResolveForWrite failed: errno=%v\n", resolveErrno)
 			return nil, 0, resolveErrno
 		}
-		fmt.Printf("[DEBUG Open] ResolveForWrite: cachePath=%s, sourcePath=%s\n", cachePath, sourcePath)
 	} else {
 		// For read operations, use ResolveForRead
 		cachePath, sourcePath, isIndependent, resolveErrno = n.pathResolver.ResolveForRead(mountPointPath)
 		if resolveErrno == syscall.ENOENT {
-			fmt.Printf("[DEBUG Open] ResolveForRead returned ENOENT\n")
 			return nil, 0, syscall.ENOENT
 		}
 		if resolveErrno != 0 {
-			fmt.Printf("[DEBUG Open] ResolveForRead failed: errno=%v\n", resolveErrno)
 			return nil, 0, resolveErrno
 		}
-		fmt.Printf("[DEBUG Open] ResolveForRead: cachePath=%s, sourcePath=%s, isIndependent=%v\n", cachePath, sourcePath, isIndependent)
 	}
 
 	cachedPath := cachePath
 	st := syscall.Stat_t{}
-	fmt.Printf("[DEBUG Open] Checking cache: cachedPath=%s\n", cachedPath)
 	err := syscall.Lstat(cachedPath, &st)
 	if err == nil {
-		fmt.Printf("[DEBUG Open] File found in cache: cachedPath=%s\n", cachedPath)
 		// File exists in cache - use it
 		// But if opening with O_APPEND and cache file is empty, copy source content first
 		copyOnWriteHappened := false
@@ -1109,23 +978,17 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 	} else {
 		// Read-only: use source file directly (no copy needed, no permission check needed)
 		// If independent, don't check source
-		fmt.Printf("[DEBUG Open] File not in cache, read-only mode: isIndependent=%v, sourcePath=%s\n", isIndependent, sourcePath)
 		if isIndependent {
-			fmt.Printf("[DEBUG Open] Path is independent, returning ENOENT\n")
 			return nil, 0, syscall.ENOENT
 		}
 		// Use resolved source path for lazy children of renamed directories
 		p = sourcePath
-		fmt.Printf("[DEBUG Open] Using source path: p=%s\n", p)
 	}
 
-	fmt.Printf("[DEBUG Open] Opening file: p=%s, flags=%d\n", p, flags)
 	f, err := syscall.Open(p, int(flags), perms)
 	if err != nil {
-		fmt.Printf("[DEBUG Open] syscall.Open failed: p=%s, err=%v\n", p, err)
 		return nil, 0, fs.ToErrno(err)
 	}
-	fmt.Printf("[DEBUG Open] Successfully opened file: p=%s\n", p)
 
 	// CRITICAL: If file was created in cache for write operations (not append, not trunc),
 	// mark it as independent immediately to prevent COW in Write()
@@ -1252,11 +1115,6 @@ func (n *ShadowNode) Rename(ctx context.Context, name string, newParent fs.Inode
 	errno := n.renameOp.Rename(sourcePath, destPath, flags, n.copyFileSimple)
 	if errno != 0 {
 		return errno
-	}
-
-	// Debug: verify trie after rename
-	if n.renameTracker != nil && (strings.Contains(sourcePath, "bar") || strings.Contains(destPath, "baz")) {
-		fmt.Printf("[DEBUG Rename] After rename, trie contents:\n%s\n", n.renameTracker.DumpTrie())
 	}
 
 	// Update child node's mirrorPath after successful rename

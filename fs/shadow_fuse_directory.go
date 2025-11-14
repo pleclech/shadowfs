@@ -2,7 +2,6 @@ package fs
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -222,9 +221,7 @@ func (n *ShadowNode) Mkdir(ctx context.Context, name string, mode uint32, out *f
 	// Check if directory already exists in cache before creating
 	// If it exists and is marked as deleted, remove it first
 	var existingSt syscall.Stat_t
-	fmt.Printf("[DEBUG Mkdir] Checking if directory exists: p=%s\n", p)
 	if err := syscall.Lstat(p, &existingSt); err == nil {
-		fmt.Printf("[DEBUG Mkdir] Directory exists in cache: p=%s\n", p)
 		// Path exists in cache - check if it's marked as deleted
 		existingAttr := xattr.XAttr{}
 		if exists, errno := xattr.Get(p, &existingAttr); errno == 0 && exists && xattr.IsPathDeleted(existingAttr) {
@@ -296,10 +293,8 @@ func (n *ShadowNode) Mkdir(ctx context.Context, name string, mode uint32, out *f
 	}
 
 	// Use os.Mkdir - it's simpler and handles mode correctly
-	fmt.Printf("[DEBUG Mkdir] Creating directory: p=%s, fileMode=%v\n", p, fileMode)
 	err = os.Mkdir(p, fileMode)
 	if err != nil {
-		fmt.Printf("[DEBUG Mkdir] os.Mkdir failed: p=%s, err=%v\n", p, err)
 		// Handle case where directory already exists (idempotent operation)
 		if os.IsExist(err) {
 			// Directory exists, verify it's actually a directory
@@ -553,7 +548,6 @@ func (n *ShadowNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 		mountPointPath := pathutil.RebaseToMountPoint(cacheName, n.mountPoint, n.cachePath)
 		mountPointPath = strings.TrimPrefix(mountPointPath, n.mountPoint)
 		mountPointPath = strings.TrimPrefix(mountPointPath, "/")
-		fmt.Printf("[DEBUG Rmdir] cacheName=%s, mountPointPath=%s\n", cacheName, mountPointPath)
 		if mountPointPath != "" {
 			n.renameTracker.SetIndependent(mountPointPath)
 		}

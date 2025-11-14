@@ -42,13 +42,10 @@ func (rt *RenameTrie) Insert(destPath, renamedFrom string, independent bool) {
 	destPath = strings.Trim(destPath, "/")
 	renamedFrom = strings.Trim(renamedFrom, "/")
 
-	fmt.Printf("[DEBUG Insert] destPath=%s, renamedFrom=%s, independent=%v\n", destPath, renamedFrom, independent)
-
 	if destPath == "" {
 		// Root path - store directly in this node
 		rt.renamedFrom = renamedFrom
 		rt.cacheIndependent = independent
-		fmt.Printf("[DEBUG Insert] Stored at root\n")
 		return
 	}
 
@@ -56,41 +53,30 @@ func (rt *RenameTrie) Insert(destPath, renamedFrom string, independent bool) {
 	parts := strings.Split(destPath, "/")
 	current := rt
 
-	fmt.Printf("[DEBUG Insert] parts=%v\n", parts)
-
 	// Navigate/create path in trie
 	for i, part := range parts {
 		if part == "" {
 			continue
 		}
 
-		fmt.Printf("[DEBUG Insert] Processing part[%d]=%s\n", i, part)
-
 		// Get or create child node
 		if current.children == nil {
 			current.children = make(map[string]*RenameTrie)
-			fmt.Printf("[DEBUG Insert] Created children map\n")
 		}
 		child, exists := current.children[part]
 		if !exists {
 			child = NewRenameTrie()
 			current.children[part] = child
-			fmt.Printf("[DEBUG Insert] Created new child node for %s\n", part)
-		} else {
-			fmt.Printf("[DEBUG Insert] Found existing child node for %s\n", part)
 		}
 
 		// If this is the last component, store rename info
 		if i == len(parts)-1 {
 			child.renamedFrom = renamedFrom
 			child.cacheIndependent = independent
-			fmt.Printf("[DEBUG Insert] Stored rename info: %s -> %s (independent=%v)\n", part, renamedFrom, independent)
 		}
 
 		current = child
 	}
-
-	fmt.Printf("[DEBUG Insert] Finished insert\n")
 }
 
 // Resolve finds the longest matching prefix and resolves the path
@@ -107,16 +93,6 @@ func (rt *RenameTrie) Resolve(mountPointPath string) (resolvedPath string, isInd
 		return "", false, false
 	}
 
-	// Debug for baz paths
-	debugBaz := strings.Contains(mountPointPath, "baz")
-	if debugBaz {
-		fmt.Printf("[DEBUG trie.Resolve] mountPointPath=%s\n", mountPointPath)
-		fmt.Printf("[DEBUG trie.Resolve] trie has children: %v\n", rt.children != nil)
-		if rt.children != nil {
-			fmt.Printf("[DEBUG trie.Resolve] children keys: %v\n", getMapKeys(rt.children))
-		}
-	}
-
 	// Split into components
 	parts := strings.Split(mountPointPath, "/")
 	current := rt
@@ -131,18 +107,11 @@ func (rt *RenameTrie) Resolve(mountPointPath string) (resolvedPath string, isInd
 			continue
 		}
 
-		if debugBaz {
-			fmt.Printf("[DEBUG trie.Resolve] Processing part[%d]=%s, matchedPath=%s\n", i, part, matchedPath)
-		}
-
 		// Check if current node has a rename (potential match)
 		if current.renamedFrom != "" {
 			bestMatch = matchedPath
 			bestRenamedFrom = current.renamedFrom
 			bestIndependent = current.cacheIndependent
-			if debugBaz {
-				fmt.Printf("[DEBUG trie.Resolve] Found rename at current node: %s -> %s\n", matchedPath, current.renamedFrom)
-			}
 		}
 
 		// Check if this path is independent - stop resolution
@@ -153,21 +122,11 @@ func (rt *RenameTrie) Resolve(mountPointPath string) (resolvedPath string, isInd
 
 		// Try to continue down the trie
 		if current.children == nil {
-			if debugBaz {
-				fmt.Printf("[DEBUG trie.Resolve] No children, breaking\n")
-			}
 			break
 		}
 		child, exists := current.children[part]
 		if !exists {
-			if debugBaz {
-				fmt.Printf("[DEBUG trie.Resolve] Child '%s' not found, breaking\n", part)
-			}
 			break
-		}
-
-		if debugBaz {
-			fmt.Printf("[DEBUG trie.Resolve] Found child '%s', renamedFrom=%s\n", part, child.renamedFrom)
 		}
 
 		// Build matched path
@@ -186,18 +145,12 @@ func (rt *RenameTrie) Resolve(mountPointPath string) (resolvedPath string, isInd
 				bestMatch = matchedPath
 				bestRenamedFrom = current.renamedFrom
 				bestIndependent = current.cacheIndependent
-				if debugBaz {
-					fmt.Printf("[DEBUG trie.Resolve] Final component has rename: %s -> %s\n", matchedPath, current.renamedFrom)
-				}
 			} else if current.cacheIndependent {
 				// Path is marked as independent (e.g., deleted) but not renamed
 				// Return it as found with independent=true
 				bestMatch = matchedPath
 				bestRenamedFrom = matchedPath // Use same path for independent paths
 				bestIndependent = true
-				if debugBaz {
-					fmt.Printf("[DEBUG trie.Resolve] Final component is independent: %s\n", matchedPath)
-				}
 			}
 		}
 	}
@@ -217,22 +170,13 @@ func (rt *RenameTrie) Resolve(mountPointPath string) (resolvedPath string, isInd
 				resolvedPath = filepath.Join(bestRenamedFrom, suffix)
 			}
 
-			if debugBaz {
-				fmt.Printf("[DEBUG trie.Resolve] RESOLVED: %s -> %s (independent=%v)\n", mountPointPath, resolvedPath, bestIndependent)
-			}
 			return resolvedPath, bestIndependent, true
 		} else if bestIndependent {
 			// Independent path without rename - return as-is
-			if debugBaz {
-				fmt.Printf("[DEBUG trie.Resolve] INDEPENDENT: %s (independent=%v)\n", mountPointPath, bestIndependent)
-			}
 			return mountPointPath, true, true
 		}
 	}
 
-	if debugBaz {
-		fmt.Printf("[DEBUG trie.Resolve] NO MATCH for %s (bestMatch=%s, bestRenamedFrom=%s)\n", mountPointPath, bestMatch, bestRenamedFrom)
-	}
 	return "", false, false
 }
 
@@ -363,11 +307,7 @@ func (rt *RenameTracker) StoreRenameMapping(sourcePath, destPath string, indepen
 	if len(independent) > 0 {
 		isIndependent = independent[0]
 	}
-	fmt.Printf("[DEBUG StoreRenameMapping] destPath=%s, sourcePath=%s, isIndependent=%v\n", destPath, sourcePath, isIndependent)
-	fmt.Printf("[DEBUG StoreRenameMapping] RenameTracker=%p, trie=%p\n", rt, rt.trie)
-	fmt.Printf("[DEBUG StoreRenameMapping] Before insert, trie contents:\n%s\n", rt.trie.Dump(""))
 	rt.trie.Insert(destPath, sourcePath, isIndependent)
-	fmt.Printf("[DEBUG StoreRenameMapping] After insert, trie contents:\n%s\n", rt.trie.Dump(""))
 }
 
 // ResolveRenamedPath resolves the original source path for a renamed directory
@@ -377,21 +317,8 @@ func (rt *RenameTracker) ResolveRenamedPath(requestedPath string) (resolvedPath 
 	// Normalize path
 	requestedPath = strings.Trim(requestedPath, "/")
 
-	// Debug for baz paths
-	if strings.Contains(requestedPath, "baz") {
-		fmt.Printf("[DEBUG ResolveRenamedPath] requestedPath=%s\n", requestedPath)
-		fmt.Printf("[DEBUG ResolveRenamedPath] rt=%p, trie=%p\n", rt, rt.trie)
-		if rt.trie != nil {
-			fmt.Printf("[DEBUG ResolveRenamedPath] trie contents:\n%s\n", rt.trie.Dump(""))
-		}
-	}
-
 	// Use trie for efficient O(m) resolution
 	resolved, independent, found := rt.trie.Resolve(requestedPath)
-
-	if strings.Contains(requestedPath, "baz") {
-		fmt.Printf("[DEBUG ResolveRenamedPath] result: resolved=%s, independent=%v, found=%v\n", resolved, independent, found)
-	}
 
 	return resolved, independent, found
 }
@@ -406,11 +333,8 @@ func (rt *RenameTracker) RemoveRenameMapping(destPath string) {
 // This is used when a path becomes independent (e.g., after deletion)
 func (rt *RenameTracker) SetIndependent(destPath string) {
 	destPath = strings.Trim(destPath, "/")
-	fmt.Printf("[DEBUG SetIndependent] destPath=%s, RenameTracker=%p, trie=%p\n", destPath, rt, rt.trie)
 	if rt.trie != nil {
-		fmt.Printf("[DEBUG SetIndependent] Before SetIndependent, trie contents:\n%s\n", rt.trie.Dump(""))
 		rt.trie.SetIndependent(destPath)
-		fmt.Printf("[DEBUG SetIndependent] After SetIndependent, trie contents:\n%s\n", rt.trie.Dump(""))
 	}
 }
 

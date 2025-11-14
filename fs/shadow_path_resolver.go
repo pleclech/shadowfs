@@ -1,7 +1,6 @@
 package fs
 
 import (
-	"fmt"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -46,11 +45,8 @@ func (pr *PathResolver) ResolvePaths(mountPointPath string) (cachePath, sourcePa
 	mountPointRelative = strings.TrimPrefix(mountPointRelative, "/")
 	mountPointRelative = strings.Trim(mountPointRelative, "/")
 
-	fmt.Printf("[DEBUG ResolvePaths] mountPointPath=%s, mountPointRelative=%s\n", mountPointPath, mountPointRelative)
-
 	if mountPointRelative == "" {
 		// Root path
-		fmt.Printf("[DEBUG ResolvePaths] Root path, returning cachePath=%s, sourcePath=%s\n", pr.cachePath, pr.srcDir)
 		return pr.cachePath, pr.srcDir, false, 0
 	}
 
@@ -59,20 +55,17 @@ func (pr *PathResolver) ResolvePaths(mountPointPath string) (cachePath, sourcePa
 	var found bool
 	if pr.renameTracker != nil {
 		resolvedRelative, isIndependent, found = pr.renameTracker.ResolveRenamedPath(mountPointRelative)
-		fmt.Printf("[DEBUG ResolvePaths] Memory tracker: found=%v, resolvedRelative=%s, isIndependent=%v\n", found, resolvedRelative, isIndependent)
 		if found {
 			if isIndependent {
 				// Path is independent - use mount point path, don't check source
 				sourcePath = filepath.Join(pr.srcDir, mountPointRelative)
 				cachePath = pr.cacheMgr.ResolveCachePath(sourcePath)
-				fmt.Printf("[DEBUG ResolvePaths] Independent path found in memory: cachePath=%s, sourcePath=%s\n", cachePath, sourcePath)
 				return cachePath, sourcePath, true, 0
 			}
 			// Found in memory - use resolved path
 			sourcePath = filepath.Join(pr.srcDir, resolvedRelative)
 			// Convert mount point relative path to cache path
 			cachePath = filepath.Join(pr.cachePath, mountPointRelative)
-			fmt.Printf("[DEBUG ResolvePaths] Renamed path found in memory: cachePath=%s, sourcePath=%s\n", cachePath, sourcePath)
 			return cachePath, sourcePath, false, 0
 		}
 	}
@@ -82,7 +75,6 @@ func (pr *PathResolver) ResolvePaths(mountPointPath string) (cachePath, sourcePa
 		// No xattr manager - return path as-is
 		sourcePath = filepath.Join(pr.srcDir, mountPointRelative)
 		cachePath = pr.cacheMgr.ResolveCachePath(sourcePath)
-		fmt.Printf("[DEBUG ResolvePaths] No xattr manager: cachePath=%s, sourcePath=%s\n", cachePath, sourcePath)
 		return cachePath, sourcePath, false, 0
 	}
 
@@ -167,7 +159,6 @@ func (pr *PathResolver) ResolvePaths(mountPointPath string) (cachePath, sourcePa
 	sourcePath = filepath.Join(pr.srcDir, resolvedPath)
 	// Convert mount point relative path to cache path
 	cachePath = filepath.Join(pr.cachePath, mountPointRelative)
-	fmt.Printf("[DEBUG ResolvePaths] Final resolution: cachePath=%s, sourcePath=%s, isIndependent=%v, resolvedPath=%s\n", cachePath, sourcePath, isIndependent, resolvedPath)
 	return cachePath, sourcePath, isIndependent, 0
 }
 
@@ -175,26 +166,21 @@ func (pr *PathResolver) ResolvePaths(mountPointPath string) (cachePath, sourcePa
 // Handles renamed paths, deletion markers, and cache priority
 // Returns: (cachePath, sourcePath, isIndependent, errno)
 func (pr *PathResolver) ResolveForRead(mountPointPath string) (cachePath, sourcePath string, isIndependent bool, errno syscall.Errno) {
-	fmt.Printf("[DEBUG ResolveForRead] mountPointPath=%s\n", mountPointPath)
 	// First resolve paths (handles rename tracking)
 	cachePath, sourcePath, isIndependent, errno = pr.ResolvePaths(mountPointPath)
 	if errno != 0 {
-		fmt.Printf("[DEBUG ResolveForRead] ResolvePaths failed: errno=%v\n", errno)
 		return "", "", false, errno
 	}
 
 	// Check if path is marked as deleted in cache
 	deleted, errno := pr.cacheMgr.IsDeleted(cachePath)
 	if errno != 0 && errno != syscall.ENODATA {
-		fmt.Printf("[DEBUG ResolveForRead] IsDeleted check failed: errno=%v\n", errno)
 		return "", "", false, errno
 	}
 	if deleted {
-		fmt.Printf("[DEBUG ResolveForRead] Path is deleted: cachePath=%s\n", cachePath)
 		return "", "", false, syscall.ENOENT
 	}
 
-	fmt.Printf("[DEBUG ResolveForRead] Final: cachePath=%s, sourcePath=%s, isIndependent=%v\n", cachePath, sourcePath, isIndependent)
 	return cachePath, sourcePath, isIndependent, 0
 }
 
@@ -271,4 +257,3 @@ func boolToString(b bool) string {
 	}
 	return "false"
 }
-
