@@ -42,6 +42,11 @@ func unmount(mountPoint string) error {
 	return fmt.Errorf("unmount failed: %v\nLazy unmount also failed: %v", stderr.String(), lazyErr)
 }
 
+func initLogger() {
+	logLevel := shadowfs.LogLevelFromString(os.Getenv("SHADOWFS_LOG_LEVEL"))
+	shadowfs.InitLogger(logLevel)
+}
+
 func main() {
 	// get name of the binary
 	binaryName := filepath.Base(os.Args[0])
@@ -195,6 +200,11 @@ func main() {
 	// without deadlock risk, even from inside Lookup, Unlink, Rename, etc.
 	root.SetServer(server)
 
+	// Start IPC server for CLI communication (works in both daemon and non-daemon mode)
+	if err := root.StartIPCServer(); err != nil {
+		log.Printf("Warning: Failed to start IPC server: %v (continuing)", err)
+	}
+
 	// Initialize Git functionality after successful mount
 	if *autoGit {
 		config := shadowfs.GitConfig{
@@ -231,16 +241,18 @@ func main() {
 
 	shutdownComplete := make(chan bool, 1)
 
-	go func() {
-		sig := <-c
-		log.Printf("Received %v signal, cleaning up...", sig)
+	cleanUpDone := false
 
-		go func() {
-			// Handle second signal for forceful shutdown
-			sig := <-c
-			log.Printf("Received second %v signal, forcing exit...", sig)
-			os.Exit(1)
-		}()
+	cleanup := func() {
+		if cleanUpDone {
+			return
+		}
+		cleanUpDone = true
+
+		// Stop IPC server and remove socket file
+		if err := root.StopIPCServer(); err != nil {
+			log.Printf("Warning: Failed to stop IPC server: %v", err)
+		}
 
 		// Cleanup Git resources and commit all pending changes
 		// CleanupGitManager calls CommitAllPending() which commits all uncommitted changes
@@ -248,7 +260,6 @@ func main() {
 
 		log.Printf("Git cleanup completed, unmounting filesystem...")
 
-		// Remove PID file if we're in daemon process
 		isDaemonChild := os.Getenv("SHADOWFS_DAEMON") == "1"
 		if isDaemonChild {
 			mountID := root.GetMountID()
@@ -257,18 +268,41 @@ func main() {
 			}
 		}
 
-		// Unmount the filesystem - this will make server.Wait() return
-		err := unmount(root.GetMountPoint())
+		log.Printf("Unmounting filesystem...")
+		err := server.Unmount()
 		if err != nil {
-			// Try server.Unmount() as fallback
-			if err := server.Unmount(); err != nil {
+			err = unmount(root.GetMountPoint())
+			if err != nil {
 				log.Printf("Warning: Unmount failed: %v", err)
 			}
-		} else {
-			// Also call server.Unmount() to ensure server.Wait() returns
-			server.Unmount()
 		}
+	}
 
+	// on panic try to cleanup
+	defer func() {
+		if !cleanUpDone {
+			if r := recover(); r != nil {
+				log.Printf("Panic: %v, trying to cleanup...", r)
+				cleanup()
+			}
+		}
+	}()
+
+	go func() {
+		sig := <-c
+		log.Printf("Received %v signal, cleaning up...", sig)
+
+		go func() {
+			time.Sleep(200 * time.Millisecond)
+			// Handle second signal for forceful shutdown
+			sig := <-c
+			log.Printf("Received second %v signal, forcing exit...", sig)
+			os.Exit(1)
+		}()
+
+		cleanup()
+
+		// Unmount the filesystem - this will make server.Wait() return
 		log.Printf("Shutdown complete")
 		shutdownComplete <- true
 	}()
@@ -276,6 +310,10 @@ func main() {
 	// Wait for server to stop (should run indefinitely until interrupted)
 	server.Wait()
 	log.Printf("Server stopped, exiting...")
+}
+
+func printWithBinaryName(binaryName string, msg string) {
+	fmt.Print(strings.ReplaceAll(msg, "{binaryname}", binaryName))
 }
 
 func printMainUsage(binaryName string) {
@@ -321,13 +359,13 @@ Examples:
 Use "{binaryname} help <command>" for command-specific help.
 `
 
-	fmt.Println(strings.ReplaceAll(cmd, "{binaryname}", binaryName))
+	printWithBinaryName(binaryName, cmd)
 }
 
 func printSubcommandHelp(command string, binaryName string) {
 	switch command {
 	case "version":
-		fmt.Print(`Usage: ` + binaryName + ` version <command> [options]
+		msg := `Usage: {binaryname} version <command> [options]
 
 Commands:
   list      List version history (commits)
@@ -336,27 +374,29 @@ Commands:
   log       Enhanced version history with more options
 
 Examples:
-  ` + binaryName + ` version list --mount-point /mnt/shadow
-  ` + binaryName + ` version list --mount-point /mnt/shadow --path "*.txt"
-  ` + binaryName + ` version list --mount-point /mnt/shadow --path "*.txt,*.go"
-  ` + binaryName + ` version diff --mount-point /mnt/shadow HEAD~1 HEAD --path "src/**/*.go"
-  ` + binaryName + ` version log --mount-point /mnt/shadow --path "*.txt"
+  {binaryname} version list --mount-point /mnt/shadow
+  {binaryname} version list --mount-point /mnt/shadow --path "*.txt"
+  {binaryname} version list --mount-point /mnt/shadow --path "*.txt,*.go"
+  {binaryname} version diff --mount-point /mnt/shadow HEAD~1 HEAD --path "src/**/*.go"
+  {binaryname} version log --mount-point /mnt/shadow --path "*.txt"
 
-Use "` + binaryName + ` version <command> --help" for command-specific help.
-`)
+Use "{binaryname} version <command> --help" for command-specific help.
+`
+		printWithBinaryName(binaryName, msg)
 	case "checkpoint":
-		fmt.Print(`Usage: ` + binaryName + ` checkpoint [options]
+		msg := `Usage: {binaryname} checkpoint [options]
 
 Options:
   --mount-point string   Mount point path (required)
   --file string          Create checkpoint for specific file
 
 Examples:
-  ` + binaryName + ` checkpoint --mount-point /mnt/shadow
-  ` + binaryName + ` checkpoint --mount-point /mnt/shadow --file path/to/file.txt
-`)
+  {binaryname} checkpoint --mount-point /mnt/shadow
+  {binaryname} checkpoint --mount-point /mnt/shadow --file path/to/file.txt
+`
+		printWithBinaryName(binaryName, msg)
 	case "sync":
-		fmt.Print(`Usage: ` + binaryName + ` sync [options]
+		msg := `Usage: {binaryname} sync [options]
 
 Options:
   --mount-point string   Mount point path (required)
@@ -370,12 +410,13 @@ Options:
   --force                Force sync even if conflicts detected
 
 Examples:
-  ` + binaryName + ` sync --mount-point /mnt/shadow --dry-run
-  ` + binaryName + ` sync --mount-point /mnt/shadow --backup
-  ` + binaryName + ` sync --mount-point /mnt/shadow --rollback --backup-id <id>
-`)
+  {binaryname} sync --mount-point /mnt/shadow --dry-run
+  {binaryname} sync --mount-point /mnt/shadow --backup
+  {binaryname} sync --mount-point /mnt/shadow --rollback --backup-id <id>
+`
+		printWithBinaryName(binaryName, msg)
 	case "backups":
-		fmt.Print(`Usage: ` + binaryName + ` backups <command> [options]
+		msg := `Usage: {binaryname} backups <command> [options]
 
 Commands:
   list      List all backups
@@ -383,10 +424,11 @@ Commands:
   delete    Delete a backup
   cleanup   Cleanup old backups
 
-Use "` + binaryName + ` backups <command> --help" for command-specific help.
-`)
+Use "{binaryname} backups <command> --help" for command-specific help.
+`
+		printWithBinaryName(binaryName, msg)
 	case "list":
-		fmt.Print(`Usage: ` + binaryName + ` list
+		msg := `Usage: {binaryname} list
 
 Lists all active mounts (both foreground and daemon processes).
 
@@ -398,10 +440,11 @@ The output shows:
   - Started: When the mount was started
 
 Examples:
-  ` + binaryName + ` list
-`)
+  {binaryname} list
+`
+		printWithBinaryName(binaryName, msg)
 	case "info":
-		fmt.Print(`Usage: ` + binaryName + ` info [options]
+		msg := `Usage: {binaryname} info [options]
 
 Shows detailed statistics for a specific mount point.
 
@@ -414,10 +457,11 @@ The output includes:
   - Git status (if enabled): last commit info, uncommitted changes
 
 Examples:
-  ` + binaryName + ` info --mount-point /mnt/shadow
-`)
+  {binaryname} info --mount-point /mnt/shadow
+`
+		printWithBinaryName(binaryName, msg)
 	case "stop":
-		fmt.Print(`Usage: ` + binaryName + ` stop [options]
+		msg := `Usage: {binaryname} stop [options]
 
 Stops a running daemon process for a mount point.
 
@@ -425,8 +469,9 @@ Options:
   --mount-point string   Mount point path (required)
 
 Examples:
-  ` + binaryName + ` stop --mount-point /mnt/shadow
-`)
+  {binaryname} stop --mount-point /mnt/shadow
+`
+		printWithBinaryName(binaryName, msg)
 	default:
 		fmt.Printf("Unknown command: %s\n\n", command)
 		printMainUsage(binaryName)

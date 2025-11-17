@@ -107,6 +107,24 @@ func (at *ActivityTracker) StopIdleMonitoring() {
 	}
 }
 
+// StopTimer stops the timer for a specific file without restarting it
+// This is used at the start of Write() to prevent timer from firing during write
+func (at *ActivityTracker) StopTimer(filePath string) {
+	if !at.shadowNode.gitManager.IsEnabled() {
+		return // Git disabled, no tracking
+	}
+	
+	at.mutex.Lock()
+	defer at.mutex.Unlock()
+	
+	if fileTimer, exists := at.fileTimers[filePath]; exists {
+		fileTimer.timer.Stop()
+		delete(at.fileTimers, filePath)
+		Debug("StopTimer: Stopped timer for %s", filePath)
+	}
+	// If file is not being tracked, this is a no-op (which is fine)
+}
+
 // commitFile commits a file when its timer expires
 func (at *ActivityTracker) commitFile(filePath string) {
 	Debug("commitFile: Attempting to commit %s", filePath)

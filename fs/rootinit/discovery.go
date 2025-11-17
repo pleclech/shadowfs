@@ -10,50 +10,16 @@ import (
 )
 
 // FindCacheDirectory finds the cache directory for a given mount point
+// This is a wrapper that normalizes the mount point and calls cache.FindCacheDirectoryForMount
 func FindCacheDirectory(mountPoint string) (string, error) {
-	// 1. Normalize mount point path using same method as NewShadowRoot for consistency
+	// Normalize mount point path using same method as NewShadowRoot for consistency
 	absMountPoint, err := GetMountPoint(mountPoint)
 	if err != nil {
 		return "", fmt.Errorf("invalid mount point: %w", err)
 	}
 
-	// 2. Try to find source directory from mount info or .target file
-	_, mountID, err := findSourceDirectory(absMountPoint)
-	if err != nil {
-		return "", fmt.Errorf("cannot find source directory: %w", err)
-	}
-
-	// 4. Search cache directories
-	// Try environment variable first
-	cacheBaseDirs := []string{}
-	if envDir := os.Getenv("SHADOWFS_CACHE_DIR"); envDir != "" {
-		if absEnvDir, err := filepath.Abs(envDir); err == nil {
-			cacheBaseDirs = append(cacheBaseDirs, absEnvDir)
-		}
-	}
-
-	// Add default cache directory using centralized function
-	if defaultDir, err := cache.GetCacheBaseDir(); err == nil {
-		cacheBaseDirs = append(cacheBaseDirs, defaultDir)
-	}
-
-	for _, baseDir := range cacheBaseDirs {
-		if baseDir == "" {
-			continue
-		}
-		sessionPath := cache.GetSessionPath(baseDir, mountID)
-		// Check if cache directory exists by checking for .target or .root
-		targetFile := cache.GetTargetFilePath(sessionPath)
-		if _, err := os.Stat(targetFile); err == nil {
-			return sessionPath, nil
-		}
-		cachePath := cache.GetCachePath(sessionPath)
-		if _, err := os.Stat(cachePath); err == nil {
-			return sessionPath, nil
-		}
-	}
-
-	return "", fmt.Errorf("cache directory not found for mount point: %s", mountPoint)
+	// Use the shared function from cache package
+	return cache.FindCacheDirectoryForMount(absMountPoint)
 }
 
 // findSourceDirectory finds the source directory for a mount point

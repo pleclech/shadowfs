@@ -55,26 +55,21 @@ func TestActivityTracker_CommitAllPending(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tempDir, err := os.MkdirTemp("", "activity-test")
-			if err != nil {
-				tu.Failf(
-					t, "Failed to create temp dir: %v", err)
-			}
-			defer os.RemoveAll(tempDir)
-
-			gm := NewGitManager(tempDir, "/tmp/source", GitConfig{
+			workspaceDir := t.TempDir()
+			sourceDir := t.TempDir()
+			gm := NewGitManager(workspaceDir, sourceDir, "", GitConfig{
 				AutoCommit: tt.gitEnabled,
-			})
+			}, nil, nil)
 			shadowNode := &ShadowNode{gitManager: gm}
 			at := NewActivityTracker(shadowNode, GitConfig{
 				IdleTimeout:  100 * time.Millisecond,
 				SafetyWindow: 50 * time.Millisecond,
 			})
 
-			// Mark activity for all files (use tempDir-relative paths)
+			// Mark activity for all files (use workspaceDir-relative paths)
 			// Also create the actual files so Git can commit them
 			for _, file := range tt.activeFiles {
-				fullPath := filepath.Join(tempDir, filepath.Base(file))
+				fullPath := filepath.Join(workspaceDir, filepath.Base(file))
 				// Create the file so Git can stage it
 				if tt.gitEnabled {
 					if err := os.WriteFile(fullPath, []byte("test content"), 0644); err != nil {
@@ -127,15 +122,11 @@ func TestActivityTracker_CommitAllPending(t *testing.T) {
 }
 
 func TestActivityTracker_StopIdleMonitoring(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "activity-test")
-	if err != nil {
-		tu.Failf(t, "Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	gm := NewGitManager(tempDir, "/tmp/source", GitConfig{
+	workspaceDir := t.TempDir()
+	sourceDir := t.TempDir()
+	gm := NewGitManager(workspaceDir, sourceDir, "", GitConfig{
 		AutoCommit: true,
-	})
+	}, nil, nil)
 	shadowNode := &ShadowNode{gitManager: gm}
 	at := NewActivityTracker(shadowNode, GitConfig{
 		IdleTimeout:  100 * time.Millisecond,
@@ -200,16 +191,11 @@ func TestActivityTracker_commitFilesBatch(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tempDir, err := os.MkdirTemp("", "activity-test")
-			if err != nil {
-				tu.Failf(
-					t, "Failed to create temp dir: %v", err)
-			}
-			defer os.RemoveAll(tempDir)
-
-			gm := NewGitManager(tempDir, "/tmp/source", GitConfig{
+			workspaceDir := t.TempDir()
+			sourceDir := t.TempDir()
+			gm := NewGitManager(workspaceDir, sourceDir, "", GitConfig{
 				AutoCommit: true,
-			})
+			}, nil, nil)
 			shadowNode := &ShadowNode{gitManager: gm}
 			at := NewActivityTracker(shadowNode, GitConfig{
 				IdleTimeout:  100 * time.Millisecond,
@@ -217,10 +203,10 @@ func TestActivityTracker_commitFilesBatch(t *testing.T) {
 			})
 
 			// Call commitFilesBatch indirectly through CommitAllPending
-			// First mark activity for files (use tempDir-relative paths)
+			// First mark activity for files (use workspaceDir-relative paths)
 			// Also create the actual files so Git can commit them
 			for _, file := range tt.files {
-				fullPath := filepath.Join(tempDir, filepath.Base(file))
+				fullPath := filepath.Join(workspaceDir, filepath.Base(file))
 				// Create the file so Git can stage it
 				if err := os.WriteFile(fullPath, []byte("test content"), 0644); err != nil {
 					tu.Failf(
@@ -241,15 +227,11 @@ func TestActivityTracker_commitFilesBatch(t *testing.T) {
 }
 
 func TestActivityTracker_hasSignificantChanges(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "activity-test")
-	if err != nil {
-		tu.Failf(t, "Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	gm := NewGitManager(tempDir, "/tmp/source", GitConfig{
+	workspaceDir := t.TempDir()
+	sourceDir := t.TempDir()
+	gm := NewGitManager(workspaceDir, sourceDir, "", GitConfig{
 		AutoCommit: true,
-	})
+	}, nil, nil)
 	shadowNode := &ShadowNode{gitManager: gm}
 	at := NewActivityTracker(shadowNode, GitConfig{
 		IdleTimeout:  100 * time.Millisecond,
@@ -257,7 +239,7 @@ func TestActivityTracker_hasSignificantChanges(t *testing.T) {
 	})
 
 	// hasSignificantChanges currently always returns true
-	// Test with various file paths (use tempDir-relative paths)
+	// Test with various file paths (use workspaceDir-relative paths)
 	testFiles := []string{
 		"file1.txt",
 		"path/to/file2.txt",
@@ -265,7 +247,7 @@ func TestActivityTracker_hasSignificantChanges(t *testing.T) {
 	}
 
 	for _, file := range testFiles {
-		fullPath := filepath.Join(tempDir, file)
+		fullPath := filepath.Join(workspaceDir, file)
 		result := at.hasSignificantChanges(fullPath)
 		if !result {
 			tu.Failf(
@@ -275,15 +257,11 @@ func TestActivityTracker_hasSignificantChanges(t *testing.T) {
 }
 
 func TestActivityTracker_TimerRescheduling(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "activity-test")
-	if err != nil {
-		tu.Failf(t, "Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	gm := NewGitManager(tempDir, "/tmp/source", GitConfig{
+	workspaceDir := t.TempDir()
+	sourceDir := t.TempDir()
+	gm := NewGitManager(workspaceDir, sourceDir, "", GitConfig{
 		AutoCommit: true,
-	})
+	}, nil, nil)
 	shadowNode := &ShadowNode{gitManager: gm}
 
 	// Use very short safety window to test rescheduling
@@ -292,7 +270,7 @@ func TestActivityTracker_TimerRescheduling(t *testing.T) {
 		SafetyWindow: 50 * time.Millisecond, // Longer than idle timeout
 	})
 
-	testFile := filepath.Join(tempDir, "test.txt")
+	testFile := filepath.Join(workspaceDir, "test.txt")
 	at.MarkActivity(testFile)
 
 	// Wait for idle timeout (but not safety window)
@@ -315,15 +293,11 @@ func TestActivityTracker_TimerRescheduling(t *testing.T) {
 }
 
 func TestActivityTracker_ConcurrentAccess(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "activity-test")
-	if err != nil {
-		tu.Failf(t, "Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	gm := NewGitManager(tempDir, "/tmp/source", GitConfig{
+	workspaceDir := t.TempDir()
+	sourceDir := t.TempDir()
+	gm := NewGitManager(workspaceDir, sourceDir, "", GitConfig{
 		AutoCommit: true,
-	})
+	}, nil, nil)
 	shadowNode := &ShadowNode{gitManager: gm}
 	at := NewActivityTracker(shadowNode, GitConfig{
 		IdleTimeout:  100 * time.Millisecond,
@@ -340,7 +314,7 @@ func TestActivityTracker_ConcurrentAccess(t *testing.T) {
 		go func(goroutineID int) {
 			defer wg.Done()
 			for j := 0; j < filesPerGoroutine; j++ {
-				file := filepath.Join(tempDir, "file", "goroutine", string(rune(goroutineID)), string(rune(j)))
+				file := filepath.Join(workspaceDir, "file", "goroutine", string(rune(goroutineID)), string(rune(j)))
 				at.MarkActivity(file)
 			}
 		}(i)
@@ -372,22 +346,18 @@ func TestActivityTracker_ConcurrentAccess(t *testing.T) {
 }
 
 func TestActivityTracker_MarkActivity_GitDisabled(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "activity-test")
-	if err != nil {
-		tu.Failf(t, "Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	gm := NewGitManager(tempDir, "/tmp/source", GitConfig{
+	workspaceDir := t.TempDir()
+	sourceDir := t.TempDir()
+	gm := NewGitManager(workspaceDir, sourceDir, "", GitConfig{
 		AutoCommit: false, // Disable Git
-	})
+	}, nil, nil)
 	shadowNode := &ShadowNode{gitManager: gm}
 	at := NewActivityTracker(shadowNode, GitConfig{
 		IdleTimeout:  100 * time.Millisecond,
 		SafetyWindow: 50 * time.Millisecond,
 	})
 
-	testFile := filepath.Join(tempDir, "test.txt")
+	testFile := filepath.Join(workspaceDir, "test.txt")
 	at.MarkActivity(testFile)
 
 	// When Git is disabled, MarkActivity should return early and not track
@@ -398,15 +368,11 @@ func TestActivityTracker_MarkActivity_GitDisabled(t *testing.T) {
 }
 
 func TestActivityTracker_GetActiveFiles(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "activity-test")
-	if err != nil {
-		tu.Failf(t, "Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	gm := NewGitManager(tempDir, "/tmp/source", GitConfig{
+	workspaceDir := t.TempDir()
+	sourceDir := t.TempDir()
+	gm := NewGitManager(workspaceDir, sourceDir, "", GitConfig{
 		AutoCommit: true,
-	})
+	}, nil, nil)
 	shadowNode := &ShadowNode{gitManager: gm}
 	at := NewActivityTracker(shadowNode, GitConfig{
 		IdleTimeout:  100 * time.Millisecond,
@@ -419,10 +385,10 @@ func TestActivityTracker_GetActiveFiles(t *testing.T) {
 		tu.Failf(t, "Expected 0 active files initially, got %d", len(activeFiles))
 	}
 
-	// Mark activity for multiple files (use tempDir-relative paths)
+	// Mark activity for multiple files (use workspaceDir-relative paths)
 	files := []string{"file1.txt", "file2.txt", "file3.txt"}
 	for _, file := range files {
-		fullPath := filepath.Join(tempDir, file)
+		fullPath := filepath.Join(workspaceDir, file)
 		at.MarkActivity(fullPath)
 	}
 
@@ -438,7 +404,7 @@ func TestActivityTracker_GetActiveFiles(t *testing.T) {
 		fileMap[file] = true
 	}
 	for _, file := range files {
-		fullPath := filepath.Join(tempDir, file)
+		fullPath := filepath.Join(workspaceDir, file)
 		if !fileMap[fullPath] {
 			tu.Failf(
 				t, "Expected file %s in active files, but not found", fullPath)
@@ -447,22 +413,18 @@ func TestActivityTracker_GetActiveFiles(t *testing.T) {
 }
 
 func TestActivityTracker_IsIdle(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "activity-test")
-	if err != nil {
-		tu.Failf(t, "Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	gm := NewGitManager(tempDir, "/tmp/source", GitConfig{
+	workspaceDir := t.TempDir()
+	sourceDir := t.TempDir()
+	gm := NewGitManager(workspaceDir, sourceDir, "", GitConfig{
 		AutoCommit: true,
-	})
+	}, nil, nil)
 	shadowNode := &ShadowNode{gitManager: gm}
 	at := NewActivityTracker(shadowNode, GitConfig{
 		IdleTimeout:  100 * time.Millisecond,
 		SafetyWindow: 50 * time.Millisecond,
 	})
 
-	testFile := filepath.Join(tempDir, "test.txt")
+	testFile := filepath.Join(workspaceDir, "test.txt")
 
 	// File should be idle initially
 	if !at.IsIdle(testFile) {
@@ -487,16 +449,12 @@ func TestActivityTracker_IsIdle(t *testing.T) {
 }
 
 func TestActivityTracker_CommitAllPending_ErrorHandling(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "activity-test")
-	if err != nil {
-		tu.Failf(t, "Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
+	workspaceDir := t.TempDir()
+	sourceDir := t.TempDir()
 	// Test with Git disabled
-	gm := NewGitManager(tempDir, "/tmp/source", GitConfig{
+	gm := NewGitManager(workspaceDir, sourceDir, "", GitConfig{
 		AutoCommit: false,
-	})
+	}, nil, nil)
 	shadowNode := &ShadowNode{gitManager: gm}
 	at := NewActivityTracker(shadowNode, GitConfig{
 		IdleTimeout:  100 * time.Millisecond,
@@ -504,7 +462,7 @@ func TestActivityTracker_CommitAllPending_ErrorHandling(t *testing.T) {
 	})
 
 	// Mark activity (won't track because Git is disabled)
-	testFile := filepath.Join(tempDir, "test.txt")
+	testFile := filepath.Join(workspaceDir, "test.txt")
 	at.MarkActivity(testFile)
 
 	// CommitAllPending should return nil when Git is disabled
@@ -515,22 +473,18 @@ func TestActivityTracker_CommitAllPending_ErrorHandling(t *testing.T) {
 }
 
 func TestActivityTracker_MarkActivity_ResetsTimer(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "activity-test")
-	if err != nil {
-		tu.Failf(t, "Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	gm := NewGitManager(tempDir, "/tmp/source", GitConfig{
+	workspaceDir := t.TempDir()
+	sourceDir := t.TempDir()
+	gm := NewGitManager(workspaceDir, sourceDir, "", GitConfig{
 		AutoCommit: true,
-	})
+	}, nil, nil)
 	shadowNode := &ShadowNode{gitManager: gm}
 	at := NewActivityTracker(shadowNode, GitConfig{
 		IdleTimeout:  50 * time.Millisecond,
 		SafetyWindow: 25 * time.Millisecond,
 	})
 
-	testFile := "/test.txt"
+	testFile := filepath.Join(workspaceDir, "test.txt")
 
 	// Mark activity first time
 	at.MarkActivity(testFile)

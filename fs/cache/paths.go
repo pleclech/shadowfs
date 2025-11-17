@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // ComputeMountID calculates the mount ID from mount point and source directory
@@ -79,5 +80,72 @@ func GetDaemonLogFilePath(mountID string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(daemonDir, mountID+".log"), nil
+}
+
+// GetSocketPath returns the Unix socket path for a mount ID
+// Uses shortened filename to avoid Unix socket path length limits (~108 chars on Linux)
+func GetSocketPath(mountID string) (string, error) {
+	daemonDir, err := GetDaemonDirPath()
+	if err != nil {
+		return "", err
+	}
+	// Use just the mountID as filename (without "shadowfs-" prefix) to keep path shorter
+	// mountID is already unique (SHA256 hash), so no prefix needed
+	return filepath.Join(daemonDir, mountID+".sock"), nil
+}
+
+// FindCacheDirectoryForMount finds the cache directory for a given mount point
+// This function searches cache directories to find the session that matches the mount point.
+// It accepts a normalized mount point (absolute, symlinks resolved) and searches for matching sessions.
+// This is in the cache package to avoid import cycles - both rootinit and testings can use it.
+func FindCacheDirectoryForMount(normalizedMountPoint string) (string, error) {
+	// Search cache directories
+	cacheBaseDirs := []string{}
+	if envDir := os.Getenv("SHADOWFS_CACHE_DIR"); envDir != "" {
+		if absEnvDir, err := filepath.Abs(envDir); err == nil {
+			cacheBaseDirs = append(cacheBaseDirs, absEnvDir)
+		}
+	}
+
+	// Add default cache directory
+	if defaultDir, err := GetCacheBaseDir(); err == nil {
+		cacheBaseDirs = append(cacheBaseDirs, defaultDir)
+	}
+
+	// Try to find session directory that matches this mount point
+	for _, baseDir := range cacheBaseDirs {
+		if baseDir == "" {
+			continue
+		}
+		entries, err := os.ReadDir(baseDir)
+		if err != nil {
+			continue
+		}
+
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			sessionPath := GetSessionPath(baseDir, entry.Name())
+			targetFile := GetTargetFilePath(sessionPath)
+			if data, err := os.ReadFile(targetFile); err == nil {
+				srcDir := strings.TrimSpace(string(data))
+				// Verify this session matches the mount point
+				mountID := ComputeMountID(normalizedMountPoint, srcDir)
+				if entry.Name() == mountID {
+					// Verify cache directory exists
+					if _, err := os.Stat(targetFile); err == nil {
+						return sessionPath, nil
+					}
+					cachePath := GetCachePath(sessionPath)
+					if _, err := os.Stat(cachePath); err == nil {
+						return sessionPath, nil
+					}
+				}
+			}
+		}
+	}
+
+	return "", fmt.Errorf("cache directory not found for mount point: %s", normalizedMountPoint)
 }
 

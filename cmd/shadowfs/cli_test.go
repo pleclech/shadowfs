@@ -25,7 +25,7 @@ func TestDaemonCommands(t *testing.T) {
 
 	tempDir, err := os.MkdirTemp("", "daemon-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -33,51 +33,51 @@ func TestDaemonCommands(t *testing.T) {
 	sourceDir := filepath.Join(tempDir, "source")
 
 	if err := os.MkdirAll(mountPoint, 0755); err != nil {
-		t.Fatalf("Failed to create mount point: %v", err)
+		tu.Failf(t, "Failed to create mount point: %v", err)
 	}
 	if err := os.MkdirAll(sourceDir, 0755); err != nil {
-		t.Fatalf("Failed to create source dir: %v", err)
+		tu.Failf(t, "Failed to create source dir: %v", err)
 	}
 
 	// Test writePIDFile
 	mountID := cache.ComputeMountID(mountPoint, sourceDir)
 	err = writePIDFile(mountID, mountPoint, sourceDir)
 	if err != nil {
-		t.Errorf("writePIDFile() error = %v", err)
+		tu.Failf(t, "writePIDFile() error = %v", err)
 	}
 
 	// Verify PID file was created
 	pidFile, err := cache.GetDaemonPIDFilePath(mountID)
 	if err != nil {
-		t.Fatalf("Failed to get PID file path: %v", err)
+		tu.Failf(t, "Failed to get PID file path: %v", err)
 	}
 
 	data, err := os.ReadFile(pidFile)
 	if err != nil {
-		t.Fatalf("Failed to read PID file: %v", err)
+		tu.Failf(t, "Failed to read PID file: %v", err)
 	}
 
 	var info DaemonInfo
 	if err := json.Unmarshal(data, &info); err != nil {
-		t.Fatalf("Failed to unmarshal PID file: %v", err)
+		tu.Failf(t, "Failed to unmarshal PID file: %v", err)
 	}
 
 	if info.MountPoint != mountPoint {
-		t.Errorf("Expected mount point %s, got %s", mountPoint, info.MountPoint)
+		tu.Failf(t, "Expected mount point %s, got %s", mountPoint, info.MountPoint)
 	}
 	if info.SourceDir != sourceDir {
-		t.Errorf("Expected source dir %s, got %s", sourceDir, info.SourceDir)
+		tu.Failf(t, "Expected source dir %s, got %s", sourceDir, info.SourceDir)
 	}
 
 	// Test removePIDFile
 	err = removePIDFile(mountID)
 	if err != nil {
-		t.Errorf("removePIDFile() error = %v", err)
+		tu.Failf(t, "removePIDFile() error = %v", err)
 	}
 
 	// Verify PID file was removed
 	if _, err := os.Stat(pidFile); err == nil {
-		t.Error("PID file should have been removed")
+		tu.Failf(t, "PID file should have been removed")
 	}
 }
 
@@ -88,7 +88,7 @@ func TestFindPIDFileByMountPoint(t *testing.T) {
 
 	tempDir, err := os.MkdirTemp("", "daemon-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -96,40 +96,41 @@ func TestFindPIDFileByMountPoint(t *testing.T) {
 	sourceDir := filepath.Join(tempDir, "source")
 
 	if err := os.MkdirAll(mountPoint, 0755); err != nil {
-		t.Fatalf("Failed to create mount point: %v", err)
+		tu.Failf(t, "Failed to create mount point: %v", err)
 	}
 	if err := os.MkdirAll(sourceDir, 0755); err != nil {
-		t.Fatalf("Failed to create source dir: %v", err)
+		tu.Failf(t, "Failed to create source dir: %v", err)
 	}
 
 	// Create PID file
 	mountID := cache.ComputeMountID(mountPoint, sourceDir)
 	err = writePIDFile(mountID, mountPoint, sourceDir)
 	if err != nil {
-		t.Fatalf("Failed to write PID file: %v", err)
+		tu.Failf(t, "Failed to write PID file: %v", err)
 	}
 	defer removePIDFile(mountID)
 
 	// Test finding PID file
 	pidFile, info, err := findPIDFileByMountPoint(mountPoint)
 	if err != nil {
-		t.Errorf("findPIDFileByMountPoint() error = %v", err)
+		tu.Failf(t, "findPIDFileByMountPoint() error = %v", err)
 	}
 	if pidFile == "" {
-		t.Error("Expected PID file path, got empty string")
+		tu.Failf(t, "Expected PID file path, got empty string")
 	}
 	if info == nil {
-		t.Error("Expected DaemonInfo, got nil")
+		tu.Failf(t, "Expected DaemonInfo, got nil")
 	} else {
 		if info.MountPoint != mountPoint {
-			t.Errorf("Expected mount point %s, got %s", mountPoint, info.MountPoint)
+			tu.Failf(
+				t, "Expected mount point %s, got %s", mountPoint, info.MountPoint)
 		}
 	}
 
 	// Test with non-existent mount point
 	_, _, err = findPIDFileByMountPoint("/nonexistent/mount")
 	if err == nil {
-		t.Error("Expected error for non-existent mount point")
+		tu.Failf(t, "Expected error for non-existent mount point")
 	}
 }
 
@@ -141,7 +142,7 @@ func TestListActiveMounts(t *testing.T) {
 	// Test listActiveMounts (may return empty list if no mounts)
 	mounts, err := listActiveMounts()
 	if err != nil {
-		t.Errorf("listActiveMounts() error = %v", err)
+		tu.Failf(t, "listActiveMounts() error = %v", err)
 	}
 	// Should not error even if no mounts exist
 	_ = mounts // May be empty, which is fine
@@ -154,17 +155,17 @@ func TestGetMountStatus(t *testing.T) {
 
 	tempDir, err := os.MkdirTemp("", "status-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
 	// Test with non-mounted directory
 	status, err := getMountStatus(tempDir)
 	if err != nil {
-		t.Logf("getMountStatus() error (may be expected): %v", err)
+		tu.Debugf(t, "getMountStatus() error (may be expected): %v", err)
 	} else if status != nil {
 		if status.Status != "inactive" {
-			t.Logf("Status for non-mounted dir: %s (may vary)", status.Status)
+			tu.Debugf(t, "Status for non-mounted dir: %s (may vary)", status.Status)
 		}
 	}
 }
@@ -176,33 +177,33 @@ func TestCheckMountPointAvailable(t *testing.T) {
 
 	tempDir, err := os.MkdirTemp("", "check-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
 	mountPoint := filepath.Join(tempDir, "mount")
 	if err := os.MkdirAll(mountPoint, 0755); err != nil {
-		t.Fatalf("Failed to create mount point: %v", err)
+		tu.Failf(t, "Failed to create mount point: %v", err)
 	}
 
 	// Test with available mount point (should not error)
 	err = checkMountPointAvailable(mountPoint)
 	if err != nil {
-		t.Logf("checkMountPointAvailable() error (may be expected if already mounted): %v", err)
+		tu.Debugf(t, "checkMountPointAvailable() error (may be expected if already mounted): %v", err)
 	}
 }
 
 func TestValidateMountPoint(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "validate-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
 	tests := []struct {
-		name      string
+		name       string
 		mountPoint string
-		shouldErr bool
+		shouldErr  bool
 	}{
 		{
 			name:       "valid directory",
@@ -215,7 +216,7 @@ func TestValidateMountPoint(t *testing.T) {
 			shouldErr:  true,
 		},
 		{
-			name:       "file instead of directory",
+			name: "file instead of directory",
 			mountPoint: func() string {
 				testFile := filepath.Join(tempDir, "testfile")
 				os.WriteFile(testFile, []byte("test"), 0644)
@@ -230,11 +231,13 @@ func TestValidateMountPoint(t *testing.T) {
 			err := validateMountPoint(tt.mountPoint)
 			if tt.shouldErr {
 				if err == nil {
-					t.Errorf("validateMountPoint(%s) expected error, got nil", tt.mountPoint)
+					tu.Failf(
+						t, "validateMountPoint(%s) expected error, got nil", tt.mountPoint)
 				}
 			} else {
 				if err != nil {
-					t.Errorf("validateMountPoint(%s) unexpected error: %v", tt.mountPoint, err)
+					tu.Failf(
+						t, "validateMountPoint(%s) unexpected error: %v", tt.mountPoint, err)
 				}
 			}
 		})
@@ -248,19 +251,19 @@ func TestStopDaemon(t *testing.T) {
 
 	tempDir, err := os.MkdirTemp("", "stop-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
 	mountPoint := filepath.Join(tempDir, "mount")
 	if err := os.MkdirAll(mountPoint, 0755); err != nil {
-		t.Fatalf("Failed to create mount point: %v", err)
+		tu.Failf(t, "Failed to create mount point: %v", err)
 	}
 
 	// Test stopping non-existent daemon (should error)
 	err = stopDaemon(mountPoint)
 	if err == nil {
-		t.Log("stopDaemon() for non-existent daemon may not error (acceptable)")
+		tu.Debugf(t, "stopDaemon() for non-existent daemon may not error (acceptable)")
 	}
 }
 
@@ -282,7 +285,7 @@ func TestCLICommands(t *testing.T) {
 
 	tempDir, err := os.MkdirTemp("", "cli-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -290,24 +293,24 @@ func TestCLICommands(t *testing.T) {
 	sourceDir := filepath.Join(tempDir, "source")
 
 	if err := os.MkdirAll(mountPoint, 0755); err != nil {
-		t.Fatalf("Failed to create mount point: %v", err)
+		tu.Failf(t, "Failed to create mount point: %v", err)
 	}
 	if err := os.MkdirAll(sourceDir, 0755); err != nil {
-		t.Fatalf("Failed to create source dir: %v", err)
+		tu.Failf(t, "Failed to create source dir: %v", err)
 	}
 
 	// Test list command
 	cmd := exec.Command(binary, "list")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Logf("list command output: %s, error: %v (may be expected)", string(output), err)
+		tu.Debugf(t, "list command output: %s, error: %v (may be expected)", string(output), err)
 	}
 
 	// Test info command with non-mounted point
 	cmd = exec.Command(binary, "info", "--mount-point", mountPoint)
 	output, err = cmd.CombinedOutput()
 	if err != nil {
-		t.Logf("info command output: %s, error: %v (may be expected)", string(output), err)
+		tu.Debugf(t, "info command output: %s, error: %v (may be expected)", string(output), err)
 	}
 }
 
@@ -329,7 +332,7 @@ func TestBackupsList(t *testing.T) {
 
 	tempDir, err := os.MkdirTemp("", "backups-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -337,16 +340,16 @@ func TestBackupsList(t *testing.T) {
 	sourceDir := filepath.Join(tempDir, "source")
 
 	if err := os.MkdirAll(mountPoint, 0755); err != nil {
-		t.Fatalf("Failed to create mount point: %v", err)
+		tu.Failf(t, "Failed to create mount point: %v", err)
 	}
 	if err := os.MkdirAll(sourceDir, 0755); err != nil {
-		t.Fatalf("Failed to create source dir: %v", err)
+		tu.Failf(t, "Failed to create source dir: %v", err)
 	}
 
 	// Create a test file in source
 	testFile := filepath.Join(sourceDir, "test.txt")
 	if err := os.WriteFile(testFile, []byte("test content"), 0644); err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
+		tu.Failf(t, "Failed to create test file: %v", err)
 	}
 
 	// Create a backup using the API (simulating sync operation)
@@ -357,26 +360,26 @@ func TestBackupsList(t *testing.T) {
 
 	backupID, _, err := shadowfs.CreateBackup(sourceDir, mountPoint)
 	if err != nil {
-		t.Fatalf("Failed to create backup: %v", err)
+		tu.Failf(t, "Failed to create backup: %v", err)
 	}
 	if backupID == "" {
-		t.Fatal("Backup ID should not be empty")
+		tu.Failf(t, "Backup ID should not be empty")
 	}
 
 	// Test backups list command
 	cmd := exec.Command(binary, "backups", "list")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("backups list command failed: %v, output: %s", err, string(output))
+		tu.Failf(t, "backups list command failed: %v, output: %s", err, string(output))
 	}
 
 	// Verify output contains backup information
 	outputStr := string(output)
 	if !strings.Contains(outputStr, backupID[:20]) {
-		t.Errorf("Expected backup ID in output, got: %s", outputStr)
+		tu.Failf(t, "Expected backup ID in output, got: %s", outputStr)
 	}
 	if !strings.Contains(outputStr, "test.txt") || !strings.Contains(outputStr, sourceDir) {
-		t.Logf("backups list output: %s", outputStr)
+		tu.Debugf(t, "backups list output: %s", outputStr)
 		// Don't fail - the output format might vary
 	}
 }
@@ -397,7 +400,7 @@ func TestBackupsInfo(t *testing.T) {
 
 	tempDir, err := os.MkdirTemp("", "backups-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -405,16 +408,16 @@ func TestBackupsInfo(t *testing.T) {
 	sourceDir := filepath.Join(tempDir, "source")
 
 	if err := os.MkdirAll(mountPoint, 0755); err != nil {
-		t.Fatalf("Failed to create mount point: %v", err)
+		tu.Failf(t, "Failed to create mount point: %v", err)
 	}
 	if err := os.MkdirAll(sourceDir, 0755); err != nil {
-		t.Fatalf("Failed to create source dir: %v", err)
+		tu.Failf(t, "Failed to create source dir: %v", err)
 	}
 
 	// Create a test file in source
 	testFile := filepath.Join(sourceDir, "test.txt")
 	if err := os.WriteFile(testFile, []byte("test content"), 0644); err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
+		tu.Failf(t, "Failed to create test file: %v", err)
 	}
 
 	// Create a backup using the API
@@ -425,23 +428,23 @@ func TestBackupsInfo(t *testing.T) {
 
 	backupID, _, err := shadowfs.CreateBackup(sourceDir, mountPoint)
 	if err != nil {
-		t.Fatalf("Failed to create backup: %v", err)
+		tu.Failf(t, "Failed to create backup: %v", err)
 	}
 
 	// Test backups info command
 	cmd := exec.Command(binary, "backups", "info", backupID)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("backups info command failed: %v, output: %s", err, string(output))
+		tu.Failf(t, "backups info command failed: %v, output: %s", err, string(output))
 	}
 
 	// Verify output contains backup information
 	outputStr := string(output)
 	if !strings.Contains(outputStr, backupID) {
-		t.Errorf("Expected backup ID in output, got: %s", outputStr)
+		tu.Failf(t, "Expected backup ID in output, got: %s", outputStr)
 	}
 	if !strings.Contains(outputStr, sourceDir) {
-		t.Errorf("Expected source path in output, got: %s", outputStr)
+		tu.Failf(t, "Expected source path in output, got: %s", outputStr)
 	}
 }
 
@@ -461,7 +464,7 @@ func TestBackupsDelete(t *testing.T) {
 
 	tempDir, err := os.MkdirTemp("", "backups-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -469,16 +472,16 @@ func TestBackupsDelete(t *testing.T) {
 	sourceDir := filepath.Join(tempDir, "source")
 
 	if err := os.MkdirAll(mountPoint, 0755); err != nil {
-		t.Fatalf("Failed to create mount point: %v", err)
+		tu.Failf(t, "Failed to create mount point: %v", err)
 	}
 	if err := os.MkdirAll(sourceDir, 0755); err != nil {
-		t.Fatalf("Failed to create source dir: %v", err)
+		tu.Failf(t, "Failed to create source dir: %v", err)
 	}
 
 	// Create a test file in source
 	testFile := filepath.Join(sourceDir, "test.txt")
 	if err := os.WriteFile(testFile, []byte("test content"), 0644); err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
+		tu.Failf(t, "Failed to create test file: %v", err)
 	}
 
 	// Create a backup using the API
@@ -489,30 +492,30 @@ func TestBackupsDelete(t *testing.T) {
 
 	backupID, backupDir, err := shadowfs.CreateBackup(sourceDir, mountPoint)
 	if err != nil {
-		t.Fatalf("Failed to create backup: %v", err)
+		tu.Failf(t, "Failed to create backup: %v", err)
 	}
 
 	// Verify backup exists
 	if _, err := os.Stat(backupDir); err != nil {
-		t.Fatalf("Backup directory should exist: %v", err)
+		tu.Failf(t, "Backup directory should exist: %v", err)
 	}
 
 	// Test backups delete command with --force flag
 	cmd := exec.Command(binary, "backups", "delete", "--force", backupID)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("backups delete command failed: %v, output: %s", err, string(output))
+		tu.Failf(t, "backups delete command failed: %v, output: %s", err, string(output))
 	}
 
 	// Verify backup was deleted
 	if _, err := os.Stat(backupDir); err == nil {
-		t.Error("Backup directory should be deleted")
+		tu.Failf(t, "Backup directory should be deleted")
 	}
 
 	// Verify output mentions deletion
 	outputStr := string(output)
 	if !strings.Contains(outputStr, backupID) {
-		t.Errorf("Expected backup ID in delete output, got: %s", outputStr)
+		tu.Failf(t, "Expected backup ID in delete output, got: %s", outputStr)
 	}
 }
 
@@ -532,7 +535,7 @@ func TestBackupsCleanup(t *testing.T) {
 
 	tempDir, err := os.MkdirTemp("", "backups-test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		tu.Failf(t, "Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
@@ -540,16 +543,16 @@ func TestBackupsCleanup(t *testing.T) {
 	sourceDir := filepath.Join(tempDir, "source")
 
 	if err := os.MkdirAll(mountPoint, 0755); err != nil {
-		t.Fatalf("Failed to create mount point: %v", err)
+		tu.Failf(t, "Failed to create mount point: %v", err)
 	}
 	if err := os.MkdirAll(sourceDir, 0755); err != nil {
-		t.Fatalf("Failed to create source dir: %v", err)
+		tu.Failf(t, "Failed to create source dir: %v", err)
 	}
 
 	// Create a test file in source
 	testFile := filepath.Join(sourceDir, "test.txt")
 	if err := os.WriteFile(testFile, []byte("test content"), 0644); err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
+		tu.Failf(t, "Failed to create test file: %v", err)
 	}
 
 	// Create a backup using the API
@@ -560,27 +563,26 @@ func TestBackupsCleanup(t *testing.T) {
 
 	backupID, _, err := shadowfs.CreateBackup(sourceDir, mountPoint)
 	if err != nil {
-		t.Fatalf("Failed to create backup: %v", err)
+		tu.Failf(t, "Failed to create backup: %v", err)
 	}
 
 	// Test backups cleanup command with --force flag and --older-than 0 (should delete all)
 	cmd := exec.Command(binary, "backups", "cleanup", "--older-than", "0", "--force")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("backups cleanup command failed: %v, output: %s", err, string(output))
+		tu.Failf(t, "backups cleanup command failed: %v, output: %s", err, string(output))
 	}
 
 	// Verify backup was deleted
 	_, err = shadowfs.ReadBackupInfo(backupID)
 	if err == nil {
-		t.Error("Backup should be deleted after cleanup")
+		tu.Failf(t, "Backup should be deleted after cleanup")
 	}
 
 	// Verify output mentions cleanup
 	outputStr := string(output)
 	if !strings.Contains(outputStr, "deleted") && !strings.Contains(outputStr, "Successfully") {
-		t.Logf("backups cleanup output: %s", outputStr)
+		tu.Debugf(t, "backups cleanup output: %s", outputStr)
 		// Don't fail - output format might vary
 	}
 }
-

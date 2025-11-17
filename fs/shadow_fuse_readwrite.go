@@ -61,7 +61,40 @@ func (n *ShadowNode) CopyFileRange(ctx context.Context, fhIn fs.FileHandle, offI
 
 func (n *ShadowNode) Write(ctx context.Context, f fs.FileHandle, data []byte, off int64) (uint32, syscall.Errno) {
 	p := n.FullPath(true)
-	
+
+	// CRITICAL: Stop the timer at the start of Write() to prevent it from firing during write
+	// Get activity tracker from root node (same logic as HandleWriteActivity)
+	activityTracker := n.activityTracker
+	if activityTracker == nil {
+		// Try to get root node to find activity tracker
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					// Root() panicked - can't traverse up, skip stopping timer
+				}
+			}()
+			root := n.Root()
+			if root != nil {
+				if rootOps := root.Operations(); rootOps != nil {
+					if rootNode, ok := rootOps.(*ShadowNode); ok && rootNode.activityTracker != nil {
+						activityTracker = rootNode.activityTracker
+					}
+				}
+			}
+		}()
+	}
+
+	// Stop timer if activity tracker is available
+	if activityTracker != nil {
+		// Convert cache path to mount point path for timer operations
+		mountPointPath := p
+		if strings.HasPrefix(p, n.cachePath) {
+			mountPointPath = n.RebasePathUsingMountPoint(p)
+		}
+		activityTracker.StopTimer(mountPointPath)
+		Debug("Write: Stopped timer for %s", mountPointPath)
+	}
+
 	// Resolve to cache path if needed (same logic as Open())
 	cachePath := p
 	if !strings.HasPrefix(p, n.cachePath) {
@@ -69,6 +102,8 @@ func (n *ShadowNode) Write(ctx context.Context, f fs.FileHandle, data []byte, of
 	} else {
 		cachePath = p
 	}
+
+	rebasedMountPath := n.RebasePathUsingMountPoint(cachePath)
 
 	// Copy-on-write: if file is in cache but not independent, and source exists, copy source content first
 	// Principle: If file exists in cache and is NOT independent (CacheIndependent = false) and also present in source,
@@ -92,7 +127,7 @@ func (n *ShadowNode) Write(ctx context.Context, f fs.FileHandle, data []byte, of
 			}
 			if !wasTruncated {
 				// Try rebasing cachePath to mount point to see if it matches p
-				rebasedMountPath := n.RebasePathUsingMountPoint(cachePath)
+				// rebasedMountPath := n.RebasePathUsingMountPoint(cachePath)
 				wasTruncated = n.truncatedFiles[rebasedMountPath]
 			}
 			// Remove from map after first write (COW won't happen again)
@@ -101,18 +136,18 @@ func (n *ShadowNode) Write(ctx context.Context, f fs.FileHandle, data []byte, of
 				delete(n.truncatedFiles, p)
 				rebasedCachePath := n.RebasePathUsingCache(p)
 				delete(n.truncatedFiles, rebasedCachePath)
-				rebasedMountPath := n.RebasePathUsingMountPoint(cachePath)
+				// rebasedMountPath := n.RebasePathUsingMountPoint(cachePath)
 				delete(n.truncatedFiles, rebasedMountPath)
 			}
 		}
-		
+
 		// CRITICAL: If file was truncated with O_TRUNC, NEVER do COW - user wants to overwrite
 		// A truncated file should remain empty until we write to it
 		if !wasTruncated {
 			// Check if file exists in cache (on disk)
 			var cacheSt syscall.Stat_t
 			fileExistsInCache := syscall.Lstat(cachePath, &cacheSt) == nil
-			
+
 			if fileExistsInCache {
 				// File exists in cache - check if it's independent
 				// If not independent and source exists, copy source content and make it independent
@@ -126,7 +161,7 @@ func (n *ShadowNode) Write(ctx context.Context, f fs.FileHandle, data []byte, of
 						isIndependent = exists && attr != nil && attr.CacheIndependent
 					}
 				}
-				
+
 				if !isIndependent {
 					// File is not independent - check if source exists
 					sourcePath := n.RebasePathUsingSrc(cachePath)
@@ -137,17 +172,40 @@ func (n *ShadowNode) Write(ctx context.Context, f fs.FileHandle, data []byte, of
 						// Principle: If file is in cache and is not independent and is also present in source,
 						// we must copy the whole content from source and make it independent
 						// This ensures patching at non-zero offsets works correctly
-						if n.helpers != nil {
-							if errno := n.helpers.CopyFile(sourcePath, cachePath); errno != 0 {
-								return 0, errno
-							}
-						} else {
-							if errno := n.copyFileSimple(sourcePath, cachePath, uint32(sourceSt.Mode)); errno != 0 {
-								return 0, errno
-							}
+						if errno := n.helpers.CopyFile(sourcePath, cachePath, uint32(sourceSt.Mode)); errno != 0 {
+							return 0, errno
 						}
 						// Once copied, file becomes independent of source
 						n.setCacheIndependent(cachePath)
+
+						// Commit original state immediately after COW (before any writes)
+						// This preserves the original state from source before modifications
+						if n.gitManager == nil {
+							Debug("COW: gitManager is nil, skipping commit for %s", cachePath)
+						} else if !n.gitManager.IsEnabled() {
+							Debug("COW: Git is disabled, skipping commit for %s", cachePath)
+						} else {
+							// Convert cache path to mount point relative path for git
+							// mountPointPath := n.RebasePathUsingMountPoint(cachePath)
+							relativePath, err := n.gitManager.normalizePath(rebasedMountPath)
+							if err != nil {
+								Debug("COW: Failed to normalize path %s -> %s: %v", cachePath, rebasedMountPath, err)
+							} else {
+								// Check if file has been committed before
+								if n.gitManager.hasFileBeenCommitted(relativePath) {
+									Debug("COW: File %s already committed, skipping commit", relativePath)
+								} else {
+									// Commit original state immediately (file is still unmodified at this point)
+									Debug("COW: Committing original state for %s (from source: %s)", relativePath, sourcePath)
+									if err := n.gitManager.commitOriginalStateSync(relativePath); err != nil {
+										// Log but don't fail - COW should succeed even if git commit fails
+										Debug("COW: Failed to commit original state for %s: %v", relativePath, err)
+									} else {
+										Debug("COW: Successfully committed original state for %s", relativePath)
+									}
+								}
+							}
+						}
 					}
 				}
 				// If file is already independent, no COW needed
@@ -162,17 +220,40 @@ func (n *ShadowNode) Write(ctx context.Context, f fs.FileHandle, data []byte, of
 					// Source file exists and has content - copy it to cache before writing/appending/patching
 					// This is lazy COW: we only copy when we need to write
 					// Once copied, file becomes independent of source
-					if n.helpers != nil {
-						if errno := n.helpers.CopyFile(sourcePath, cachePath); errno != 0 {
-							return 0, errno
-						}
-					} else {
-						if errno := n.copyFileSimple(sourcePath, cachePath, sourceSt.Mode); errno != 0 {
-							return 0, errno
-						}
+					if errno := n.helpers.CopyFile(sourcePath, cachePath, uint32(sourceSt.Mode)); errno != 0 {
+						return 0, errno
 					}
 					// Mark as independent after copying
 					n.setCacheIndependent(cachePath)
+
+					// Commit original state immediately after COW (before any writes)
+					// This preserves the original state from source before modifications
+					if n.gitManager == nil {
+						Debug("COW: gitManager is nil, skipping commit for %s", cachePath)
+					} else if !n.gitManager.IsEnabled() {
+						Debug("COW: Git is disabled, skipping commit for %s", cachePath)
+					} else {
+						// Convert cache path to mount point relative path for git
+						mountPointPath := n.RebasePathUsingMountPoint(cachePath)
+						relativePath, err := n.gitManager.normalizePath(mountPointPath)
+						if err != nil {
+							Debug("COW: Failed to normalize path %s -> %s: %v", cachePath, mountPointPath, err)
+						} else {
+							// Check if file has been committed before
+							if n.gitManager.hasFileBeenCommitted(relativePath) {
+								Debug("COW: File %s already committed, skipping commit", relativePath)
+							} else {
+								// Commit original state immediately (file is still unmodified at this point)
+								Debug("COW: Committing original state for %s (from source: %s)", relativePath, sourcePath)
+								if err := n.gitManager.commitOriginalStateSync(relativePath); err != nil {
+									// Log but don't fail - COW should succeed even if git commit fails
+									Debug("COW: Failed to commit original state for %s: %v", relativePath, err)
+								} else {
+									Debug("COW: Successfully committed original state for %s", relativePath)
+								}
+							}
+						}
+					}
 				}
 			}
 		}
@@ -185,7 +266,16 @@ func (n *ShadowNode) Write(ctx context.Context, f fs.FileHandle, data []byte, of
 		}
 		return 0, syscall.EBADF
 	}()
+
 	if errno == 0 {
+		Debug("Write: Successful write to %s, mntPath: %s", p, rebasedMountPath)
+
+		// Mark file as dirty after successful write
+		// Use mount point path (not cache path) because what's dirty is what's visible at the mount point
+		// Ref count starts at 1 (this write handle)
+		Debug("Write: Marking dirty with mountPointPath=%s (cachePath=%s)", rebasedMountPath, cachePath)
+		n.markDirty(rebasedMountPath)
+
 		// CRITICAL: After successful write, ensure file metadata is updated
 		// This prevents git from seeing empty files immediately after write
 		// Try to sync the file to ensure data is written and size is updated
@@ -208,8 +298,12 @@ func (n *ShadowNode) Write(ctx context.Context, f fs.FileHandle, data []byte, of
 			}
 		}
 
-		// Track write activity for Git auto-versioning
+		n.Flush(ctx, f, nil)
+
+		// CRITICAL: Restart the timer from zero after successful write
+		// This ensures the idle timer only fires when the file is truly idle (no writes happening)
 		n.HandleWriteActivity(p)
+		Debug("Write: Restarted timer from zero for %s", p)
 	}
 	return written, errno
 }
@@ -220,4 +314,3 @@ func (n *ShadowNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off
 	}
 	return nil, syscall.EBADF
 }
-

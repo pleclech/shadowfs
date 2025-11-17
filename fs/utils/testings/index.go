@@ -1,6 +1,8 @@
 package testings
 
 import (
+	"bytes"
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"os"
@@ -14,6 +16,10 @@ import (
 	"time"
 )
 
+// Constants duplicated from fs package to avoid import cycle
+// These match fs/constants.go
+const rootName = ".root"
+
 func IndentMessage(level int, message string) string {
 	indent := strings.Repeat("  ", level) // 2 spaces per level
 	lines := strings.Split(message, "\n")
@@ -24,10 +30,14 @@ func IndentMessage(level int, message string) string {
 	return strings.Join(indented, "\n")
 }
 
-func DirListUsingLs(dir string, t *testing.T) {
+func DirListUsingLs(dir string, t *testing.T, recursive ...bool) {
 	t.Helper()
 	Debug(t, fmt.Sprintf("Debug list the directory: %s", dir))
-	lsCmd := exec.Command("ls", "-la")
+	flags := "-la"
+	if len(recursive) > 0 && recursive[0] {
+		flags += "R"
+	}
+	lsCmd := exec.Command("ls", flags)
 	lsCmd.Dir = dir
 	out, err := lsCmd.CombinedOutput()
 	if err != nil {
@@ -40,7 +50,11 @@ func ShouldCreateDir(path string, t *testing.T, levels ...int) {
 	t.Helper()
 	level := getLevel(levels...)
 	InfoFIndent(t, level, "directory %s should be created", path)
-	if err := os.Mkdir(path, 0755); err != nil {
+	// Check if directory already exists (idempotent mkdir)
+	if info, err := os.Stat(path); err == nil && info.IsDir() {
+		// Directory already exists - idempotent success
+		DebugFIndent(t, level+1, "directory %s already exists (idempotent)", path)
+	} else if err := os.Mkdir(path, 0755); err != nil {
 		FailFIndent(t, level, "failed to create directory: %v", err)
 	}
 	ShouldExist(path, t, level+1)
@@ -445,20 +459,30 @@ func GetCachePath(mountPoint, srcDir, relPath string) string {
 	return filepath.Join(cacheRoot, relPath)
 }
 
-// CreateSourceFiles creates multiple source files in the source directory
+// CreateFilesInDirectory creates multiple files in the source directory
 // Automatically creates parent directories as needed
-func CreateSourceFiles(srcDir string, files map[string]string, t *testing.T, levels ...int) {
+func CreateFilesInDirectory(srcDir string, files map[string]string, t *testing.T, levels ...int) {
 	t.Helper()
 	level := getLevel(levels...)
-	InfoFIndent(t, level, "creating %d source files", len(files))
+	InfoFIndent(t, level, "creating %d files in %s", len(files), srcDir)
 	for path, content := range files {
 		fullPath := filepath.Join(srcDir, path)
-		dir := filepath.Dir(fullPath)
+		dirOnly := strings.HasSuffix(path, "/")
+
+		var dir string
+		if dirOnly {
+			dir = fullPath
+		} else {
+			dir = filepath.Dir(fullPath)
+		}
+
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			FailFIndent(t, level, "failed to create directory %s: %v", dir, err)
 		}
-		if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
-			FailFIndent(t, level, "failed to create file %s: %v", fullPath, err)
+		ShouldBeRegularDirectory(dir, t, level+1)
+
+		if !dirOnly {
+			ShouldCreateFile(fullPath, content, t, level+1)
 		}
 	}
 	SuccessFIndent(t, level, "")
@@ -678,21 +702,13 @@ func (bm *BinaryManager) RunBinary(t *testing.T, mountPoint, srcDir string, cach
 
 	args := []string{}
 
-	logLevel := strings.ToLower(os.Getenv("SHADOWFS_LOG_LEVEL"))
-	if logLevel == "debug" {
-		args = append(args, "--debug")
-	}
-
-	if os.Getenv("SHADOWFS_DEBUG_FUSE") == "1" {
-		args = append(args, "--debug-fuse")
-	}
-
 	if len(cacheDir) > 0 && cacheDir[0] != "" {
 		args = append(args, "--cache-dir", cacheDir[0])
 	}
 	args = append(args, mountPoint, srcDir)
 
 	cmd := exec.Command(bm.binaryPath, args...)
+	cmd.Env = os.Environ()
 
 	stdoutWriter := NewTestLogWriter(t, "[stdout] ")
 	stderrWriter := NewTestLogWriter(t, "[stderr] ")
@@ -703,10 +719,22 @@ func (bm *BinaryManager) RunBinary(t *testing.T, mountPoint, srcDir string, cach
 }
 
 // GracefulShutdown gracefully shuts down a process and unmounts the mount point
+//
+// How it works:
+// 1. Sends SIGTERM to the process (triggers graceful shutdown in shadowfs)
+// 2. Waits up to 5 seconds for process to exit gracefully
+// 3. If still running, sends SIGKILL to force termination
+// 4. Unmounts the mount point
+//
+// The shadowfs process handles SIGTERM by:
+// - Committing all pending Git changes (if auto-git enabled)
+// - Unmounting the filesystem
+// - Cleaning up resources
 func GracefulShutdown(cmd *exec.Cmd, mountPoint string, t *testing.T) {
 	t.Helper()
 
-	if cmd.Process != nil {
+	if cmd != nil && cmd.Process != nil {
+		// Send SIGTERM for graceful shutdown
 		cmd.Process.Signal(syscall.SIGTERM)
 		done := make(chan error, 1)
 		go func() {
@@ -715,7 +743,9 @@ func GracefulShutdown(cmd *exec.Cmd, mountPoint string, t *testing.T) {
 
 		select {
 		case <-time.After(5 * time.Second):
+			// Process didn't exit within timeout, force kill
 			if cmd.Process != nil {
+				t.Logf("Process didn't exit within 5s, forcing termination")
 				cmd.Process.Kill()
 				cmd.Wait()
 			}
@@ -726,8 +756,29 @@ func GracefulShutdown(cmd *exec.Cmd, mountPoint string, t *testing.T) {
 		}
 	}
 
-	// Unmount after process exits
+	// Unmount after process exits (in case process didn't unmount itself)
+	// This is safe even if already unmounted
 	exec.Command("umount", mountPoint).Run()
+}
+
+// stopDaemonViaCLI stops a daemon process using the shadowfs CLI command
+// Used when filesystem was started in daemon mode (we don't have cmd handle)
+func stopDaemonViaCLI(binaryPath, mountPoint string, t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, binaryPath, "stop", "--mount-point", mountPoint)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			t.Logf("Stop command timed out, attempting direct unmount")
+		} else {
+			t.Logf("Stop command failed: %v, output: %s", err, string(output))
+		}
+		// Fallback to direct unmount
+		exec.Command("umount", mountPoint).Run()
+	}
 }
 
 // SetupFilesystemWithCache creates a standardized filesystem setup for tests
@@ -760,7 +811,7 @@ func SetupFilesystemWithCache(t *testing.T, binaryPath string, cacheDir ...strin
 // SetupTestMain sets up TestMain with binary management
 // Returns a function to call in TestMain's defer
 // Note: This creates a temporary testing.T for setup, which is acceptable for TestMain
-func SetupTestMain(m *testing.M, binaryPath string, logLevel string) func() {
+func SetupTestMain(m *testing.M, binaryPath string) func() {
 	// Create a temporary test context for setup
 	// We can't use *testing.T in TestMain, so we'll create directories manually
 	tempDir, err := os.MkdirTemp("", "shadowfs-test-*")
@@ -787,8 +838,6 @@ func SetupTestMain(m *testing.M, binaryPath string, logLevel string) func() {
 		cacheDir:   filepath.Join(tempDir, "cache"),
 	}
 
-	os.Setenv("SHADOWFS_LOG_LEVEL", logLevel)
-
 	if err := bm.BuildBinary(); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to build binary: %v\n", err)
 		os.Exit(1)
@@ -798,4 +847,775 @@ func SetupTestMain(m *testing.M, binaryPath string, logLevel string) func() {
 		bm.Cleanup()
 		os.RemoveAll(tempDir)
 	}
+}
+
+// ============================================================================
+// Test Filesystem Helpers (Reusable for Integration Tests)
+// ============================================================================
+
+// TestFilesystem represents a test filesystem setup with common operations
+//
+// How it works:
+// - Filesystem runs in foreground mode (cmd.Start() keeps process handle)
+// - Process runs until SIGTERM is sent (via Cleanup())
+// - CLI commands (like version restore) are separate processes that access the mount point
+// - All tests use defer fs.Cleanup() to ensure graceful shutdown
+//
+// Foreground vs Daemon mode:
+// - Foreground (default): Better for tests - direct process control, easier cleanup
+// - Daemon: Parent exits immediately, cleanup must use PID file or CLI command
+type TestFilesystem struct {
+	mountPoint string
+	srcDir     string
+	cacheDir   string
+	cmd        *exec.Cmd
+	binaryPath string // Store binary path for daemon mode cleanup
+	isDaemon   bool   // Track if started in daemon mode
+	t          *testing.T
+}
+
+// NewTestFilesystem creates a new test filesystem and starts it
+func NewTestFilesystem(t *testing.T, binaryPath string, initialContent map[string]string) *TestFilesystem {
+	t.Helper()
+
+	testMgr := NewBinaryManager(t, binaryPath)
+
+	mntDir := testMgr.MntDir()
+	srcDir := testMgr.SrcDir()
+	cacheDir := testMgr.CacheDir()
+
+	if cacheDir != "" {
+		os.Setenv("SHADOWFS_CACHE_DIR", cacheDir)
+	}
+
+	if initialContent != nil {
+		CreateFilesInDirectory(srcDir, initialContent, t)
+	}
+
+	cmd, err := testMgr.RunBinary(t, mntDir, srcDir, cacheDir)
+	if err != nil {
+		Failf(t, "Failed to start filesystem: %v", err)
+	}
+
+	WaitForFilesystemReady(0)
+
+	return &TestFilesystem{
+		mountPoint: mntDir,
+		srcDir:     srcDir,
+		cacheDir:   cacheDir,
+		cmd:        cmd,
+		binaryPath: binaryPath,
+		t:          t,
+	}
+}
+
+// GitTestConfig holds configuration for Git-enabled test filesystems
+type GitTestConfig struct {
+	IdleTimeout  time.Duration // Git idle timeout (default: 30s, use shorter for faster tests)
+	SafetyWindow time.Duration // Git safety window (default: 5s, use shorter for faster tests)
+	Daemon       bool          // Run as daemon (default: false, foreground mode for tests)
+}
+
+// NewTestFilesystemWithGit creates a new test filesystem with Git enabled
+// Uses default Git timing (30s idle, 5s safety window) for realistic behavior
+func NewTestFilesystemWithGit(t *testing.T, binaryPath string, initialContent map[string]string) *TestFilesystem {
+	return NewTestFilesystemWithGitConfig(t, binaryPath, GitTestConfig{}, initialContent)
+}
+
+// NewTestFilesystemWithGitConfig creates a new test filesystem with Git enabled and custom configuration
+// Useful for tests that need faster commits (shorter idle timeout) or specific Git timing
+func NewTestFilesystemWithGitConfig(t *testing.T, binaryPath string, config GitTestConfig, initialContent map[string]string) *TestFilesystem {
+	t.Helper()
+
+	testMgr := NewBinaryManager(t, binaryPath)
+	mountPoint := testMgr.MntDir()
+	srcDir := testMgr.SrcDir()
+
+	if initialContent != nil {
+		CreateFilesInDirectory(srcDir, initialContent, t)
+	}
+
+	// Set cache directory environment variable BEFORE building command
+	// This ensures FindCacheDirectory can discover it when GetGitRepository is called
+	// Both the filesystem process and test code need access to this
+	cacheDir := testMgr.CacheDir()
+	if cacheDir != "" {
+		os.Setenv("SHADOWFS_CACHE_DIR", cacheDir)
+	}
+
+	// Build command arguments
+	args := []string{"--auto-git"}
+
+	// Add Git timing flags if specified (use defaults if not set)
+	if config.IdleTimeout > 0 {
+		args = append(args, "--git-idle-timeout", config.IdleTimeout.String())
+	}
+	if config.SafetyWindow > 0 {
+		args = append(args, "--git-safety-window", config.SafetyWindow.String())
+	}
+
+	// Daemon mode support:
+	// - In daemon mode, the parent process exits immediately (os.Exit(0))
+	// - We lose the cmd handle, so cleanup must use PID file instead
+	// - For tests, foreground mode is recommended (better control, easier cleanup)
+	// - If daemon mode is used, Cleanup() will use stopDaemonViaCLI() instead
+	if config.Daemon {
+		args = append(args, "--daemon")
+	}
+
+	// Add cache directory flag if available
+	if cacheDir != "" {
+		args = append(args, "--cache-dir", cacheDir)
+	}
+
+	// Add positional arguments (mount point and source directory)
+	args = append(args, mountPoint, srcDir)
+
+	cmd := exec.Command(binaryPath, args...)
+	cmd.Env = os.Environ()
+
+	stdoutWriter := NewTestLogWriter(t, "[stdout] ")
+	stderrWriter := NewTestLogWriter(t, "[stderr] ")
+	cmd.Stdout = stdoutWriter
+	cmd.Stderr = stderrWriter
+
+	if err := cmd.Start(); err != nil {
+		Failf(t, "Failed to start filesystem: %v", err)
+	}
+
+	WaitForFilesystemReady(0)
+
+	return &TestFilesystem{
+		mountPoint: mountPoint,
+		srcDir:     srcDir,
+		cacheDir:   testMgr.CacheDir(),
+		cmd:        cmd,
+		binaryPath: binaryPath,
+		isDaemon:   config.Daemon,
+		t:          t,
+	}
+}
+
+// NewTestFilesystemFromExisting creates a TestFilesystem from existing setup
+// Useful for tests that need custom filesystem initialization
+func NewTestFilesystemFromExisting(t *testing.T, mountPoint, srcDir, cacheDir string, cmd *exec.Cmd, binaryPath string) *TestFilesystem {
+	t.Helper()
+	return &TestFilesystem{
+		mountPoint: mountPoint,
+		srcDir:     srcDir,
+		cacheDir:   cacheDir,
+		cmd:        cmd,
+		binaryPath: binaryPath,
+		isDaemon:   false, // Assume foreground unless specified
+		t:          t,
+	}
+}
+
+// Cleanup shuts down the test filesystem gracefully
+//
+// For foreground mode: Uses cmd handle to send SIGTERM directly
+// For daemon mode: Uses CLI command (shadowfs stop) since we don't have cmd handle
+//
+// Ensures:
+// - All pending Git commits are saved (if auto-git enabled)
+// - Filesystem is unmounted
+// - Resources are cleaned up
+func (fs *TestFilesystem) Cleanup() {
+	if fs.isDaemon {
+		// Daemon mode: use CLI command to stop
+		stopDaemonViaCLI(fs.binaryPath, fs.mountPoint, fs.t)
+	} else {
+		// Foreground mode: use direct process control
+		GracefulShutdown(fs.cmd, fs.mountPoint, fs.t)
+	}
+}
+
+// MountPoint returns the mount point path
+func (fs *TestFilesystem) MountPoint() string {
+	return fs.mountPoint
+}
+
+// SourceDir returns the source directory path
+func (fs *TestFilesystem) SourceDir() string {
+	return fs.srcDir
+}
+
+// CacheDir returns the cache directory path
+func (fs *TestFilesystem) CacheDir() string {
+	return fs.cacheDir
+}
+
+func (fs *TestFilesystem) CacheID() string {
+	fs.t.Helper()
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(fs.mountPoint+fs.srcDir)))
+}
+
+func (fs *TestFilesystem) CacheRoot() string {
+	fs.t.Helper()
+	return filepath.Join(fs.cacheDir, fs.CacheID(), ".root")
+}
+
+// MountPath returns the mount point path for a relative path
+func (fs *TestFilesystem) MountPath(relPaths ...string) string {
+	fs.t.Helper()
+	return filepath.Join(fs.mountPoint, filepath.Join(relPaths...))
+}
+
+// SourcePath returns the source directory path for a relative path
+func (fs *TestFilesystem) SourcePath(relPaths ...string) string {
+	fs.t.Helper()
+	return filepath.Join(fs.srcDir, filepath.Join(relPaths...))
+}
+
+func (fs *TestFilesystem) CachePath(relPaths ...string) string {
+	fs.t.Helper()
+	return filepath.Join(fs.cacheDir, filepath.Join(relPaths...))
+}
+
+// CreateSourceDir creates a directory in the source directory
+func (fs *TestFilesystem) CreateSourceDir(relPath string) string {
+	fs.t.Helper()
+	if relPath == "" {
+		return fs.SourceDir()
+	}
+	fullPath := fs.SourcePath(relPath)
+	if err := os.MkdirAll(fullPath, 0755); err != nil {
+		Failf(fs.t, "Failed to create source directory %s: %v", fullPath, err)
+	}
+	ShouldCreateDir(fullPath, fs.t)
+	return fullPath
+}
+
+// CreateSourceFile creates a file in the source directory
+func (fs *TestFilesystem) CreateSourceFile(relPath string, content []byte) string {
+	fs.t.Helper()
+	fullPath := filepath.Join(fs.CreateSourceDir(filepath.Dir(relPath)), filepath.Base(relPath))
+	ShouldCreateFile(fullPath, string(content), fs.t)
+	return fullPath
+}
+
+func (fs *TestFilesystem) CreateMountDir(relPath string) string {
+	fs.t.Helper()
+	if relPath == "" {
+		return fs.MountPoint()
+	}
+	fullPath := fs.MountPath(relPath)
+	if err := os.MkdirAll(fullPath, 0755); err != nil {
+		Failf(fs.t, "Failed to create mount directory %s: %v", fullPath, err)
+	}
+	ShouldCreateDir(fullPath, fs.t)
+	return fullPath
+}
+
+func (fs *TestFilesystem) CreateMountFile(relPath string, content []byte) string {
+	fs.t.Helper()
+	fullPath := filepath.Join(fs.CreateMountDir(filepath.Dir(relPath)), filepath.Base(relPath))
+	ShouldCreateFile(fullPath, string(content), fs.t)
+	return fullPath
+}
+
+// ReadFile reads a file from the mount point and returns its content
+func (fs *TestFilesystem) ReadFile(relPath string) string {
+	return ReadFileContent(fs.MountPath(relPath), fs.t)
+}
+
+// WriteFile writes content to a file in the mount point
+// This overwrites existing files (truncates first)
+// Note: The filesystem strips O_TRUNC flag and does copy-on-write in Write() when off==0,
+// which can leave trailing bytes. We work around this by writing in a way that avoids COW.
+func (fs *TestFilesystem) WriteFile(relPath string, content []byte) {
+	fs.t.Helper()
+	fullPath := fs.MountPath(relPath)
+	dir := filepath.Dir(fullPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		Failf(fs.t, "Failed to create directory %s: %v", dir, err)
+	}
+
+	// Open file for writing (filesystem strips O_TRUNC)
+	file, err := os.OpenFile(fullPath, os.O_WRONLY|os.O_CREATE, 0644)
+	if err != nil {
+		Failf(fs.t, "Failed to open file %s for writing: %v", relPath, err)
+	}
+
+	// Manually truncate to 0 to clear any existing content
+	// This must happen BEFORE any write to avoid COW copying source content
+	if err := file.Truncate(0); err != nil {
+		file.Close()
+		Failf(fs.t, "Failed to truncate file %s: %v", relPath, err)
+	}
+
+	// Seek to beginning
+	if _, err := file.Seek(0, 0); err != nil {
+		file.Close()
+		Failf(fs.t, "Failed to seek file %s: %v", relPath, err)
+	}
+
+	// Write all content
+	written, err := file.Write(content)
+	if err != nil {
+		file.Close()
+		Failf(fs.t, "Failed to write file %s: %v", relPath, err)
+	}
+
+	// Truncate again after write to ensure no trailing bytes
+	// This handles the case where COW copied source content
+	if err := file.Truncate(int64(len(content))); err != nil {
+		file.Close()
+		Failf(fs.t, "Failed to truncate file %s after write: %v", relPath, err)
+	}
+
+	// Sync and close
+	if err := file.Sync(); err != nil {
+		file.Close()
+		Failf(fs.t, "Failed to sync file %s: %v", relPath, err)
+	}
+	if err := file.Close(); err != nil {
+		Failf(fs.t, "Failed to close file %s: %v", relPath, err)
+	}
+
+	if written != len(content) {
+		Failf(fs.t, "Failed to write all content to %s: wrote %d of %d bytes", relPath, written, len(content))
+	}
+
+	// Small delay to ensure FUSE has processed the write
+	time.Sleep(50 * time.Millisecond)
+
+	// Verify the write succeeded by reading back
+	actualContent := fs.ReadFile(relPath)
+	if actualContent != string(content) {
+		Failf(fs.t, "File content mismatch after write: expected %q (%d bytes), got %q (%d bytes)",
+			string(content), len(content), actualContent, len(actualContent))
+	}
+}
+
+// WriteFileInMount writes content to a file in the mount point (simple version without COW handling)
+func (fs *TestFilesystem) WriteFileInMount(relPath string, content []byte) {
+	fs.t.Helper()
+
+	fullPath := fs.MountPath(relPath)
+	dir := filepath.Dir(fullPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		Failf(fs.t, "Failed to create directory %s: %v", dir, err)
+	}
+	if err := os.WriteFile(fullPath, content, 0644); err != nil {
+		Failf(fs.t, "Failed to write file %s: %v", relPath, err)
+	}
+	ShouldHaveSameContent(fullPath, string(content), fs.t)
+}
+
+// RemoveFile removes a file from the mount point
+func (fs *TestFilesystem) RemoveFile(relPath string) {
+	ShouldRemoveFile(fs.MountPath(relPath), fs.t)
+}
+
+// Mkdir creates a directory in the mount point
+func (fs *TestFilesystem) Mkdir(relPath string) {
+	ShouldCreateDir(fs.MountPath(relPath), fs.t)
+}
+
+// Rename renames a file/directory in the mount point
+func (fs *TestFilesystem) Rename(oldPath, newPath string) {
+	fs.t.Helper()
+	oldFullPath := fs.MountPath(oldPath)
+	newFullPath := fs.MountPath(newPath)
+
+	// Check if it's a directory to use appropriate helper
+	if info, err := os.Stat(oldFullPath); err == nil && info.IsDir() {
+		ShouldRenameDir(oldFullPath, newFullPath, fs.t)
+	} else {
+		ShouldRenameFile(oldFullPath, newFullPath, fs.t)
+	}
+}
+
+// AssertFileExists verifies a file exists in the mount point
+func (fs *TestFilesystem) AssertFileExists(relPath string) {
+	ShouldExist(fs.MountPath(relPath), fs.t)
+}
+
+// AssertFileNotExists verifies a file does not exist in the mount point
+func (fs *TestFilesystem) AssertFileNotExists(relPath string) {
+	ShouldNotExist(fs.MountPath(relPath), fs.t)
+}
+
+// AssertFileContent verifies file content matches expected
+func (fs *TestFilesystem) AssertFileContent(relPath, expected string) {
+	fs.t.Helper()
+	ShouldHaveSameContent(fs.MountPath(relPath), expected, fs.t)
+}
+
+// AssertSourceUnchanged verifies source file content is unchanged
+func (fs *TestFilesystem) AssertSourceUnchanged(relPath, expected string) {
+	ShouldHaveSameContent(fs.SourcePath(relPath), expected, fs.t)
+}
+
+// AssertSourceExists verifies source file exists
+func (fs *TestFilesystem) AssertSourceExists(relPath string) {
+	ShouldExist(fs.SourcePath(relPath), fs.t)
+}
+
+// AssertSourceNotExists verifies source file does not exist
+func (fs *TestFilesystem) AssertSourceNotExists(relPath string) {
+	ShouldNotExist(fs.SourcePath(relPath), fs.t)
+}
+
+// ListDir lists directory entries from mount point
+func (fs *TestFilesystem) ListDir(relPath string) []os.DirEntry {
+	return ListDir(fs.MountPath(relPath), fs.t)
+}
+
+// GetCachePath returns the cache path for a given relative path
+func (fs *TestFilesystem) GetCachePath(relPath string) string {
+	return GetCachePath(fs.mountPoint, fs.srcDir, relPath)
+}
+
+// Restart restarts the filesystem
+func (fs *TestFilesystem) Restart() {
+	fs.t.Helper()
+	fs.Cleanup()
+	WaitForFilesystemReady(0)
+
+	testMgr := NewBinaryManager(fs.t, fs.binaryPath)
+	cmd, err := testMgr.RunBinary(fs.t, fs.mountPoint, fs.srcDir, testMgr.CacheDir())
+	if err != nil {
+		Failf(fs.t, "Failed to restart filesystem: %v", err)
+	}
+	fs.cmd = cmd
+	WaitForFilesystemReady(0)
+}
+
+// ============================================================================
+// Git Helper Functions
+// ============================================================================
+
+// GetGitDir returns the Git directory path for a mount point
+func GetGitDir(mountPoint string, gitofsName string) string {
+	return filepath.Join(mountPoint, gitofsName, ".git")
+}
+
+// GetAllCommits gets all commit hashes in chronological order (oldest first)
+// Uses timeout to prevent hangs when accessing Git through FUSE mount
+// Accesses Git directory through cache directory to avoid FUSE deadlocks
+// findCacheDirFn is a function to find cache directory (e.g., cache.FindCacheDirectoryForMount)
+// This avoids import cycle: testings doesn't import cache, caller passes the function
+func GetAllCommits(t *testing.T, mountPoint string, gitofsName string, findCacheDirFn func(string) (string, error)) []string {
+	t.Helper()
+
+	// Normalize mount point path
+	absMountPoint, err := filepath.Abs(mountPoint)
+	if err != nil {
+		Failf(t, "Invalid mount point: %v", err)
+		return []string{}
+	}
+
+	// Resolve symlinks
+	if resolvedPath, err := filepath.EvalSymlinks(absMountPoint); err == nil {
+		absMountPoint = resolvedPath
+	}
+
+	// Find cache directory using provided function (avoids import cycle)
+	cacheDir, err := findCacheDirFn(absMountPoint)
+	if err != nil {
+		Failf(t, "Failed to find cache directory for mount point %s: %v", mountPoint, err)
+		return []string{}
+	}
+
+	// Access Git directory through cache directory, not mount point
+	// Git repository is at .root/.gitofs/.git relative to the session directory
+	// (all files in mount point are stored under .root in the cache)
+	cachePath := filepath.Join(cacheDir, rootName)
+	gitDir := filepath.Join(cachePath, gitofsName, ".git")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Use cache path (.root) as working directory for read-only Git operations (avoids FUSE)
+	cmd := exec.CommandContext(ctx, "git", "--git-dir", gitDir, "-C", cachePath, "log", "--oneline", "--format=%H", "--reverse")
+	output, err := cmd.CombinedOutput()
+	outputStr := string(output)
+	if isCommitEmpty(outputStr) {
+		return []string{}
+	}
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			Failf(t, "Git log command timed out after 10s when accessing %s. This may indicate a FUSE deadlock.", gitDir)
+		}
+		Failf(t, "Failed to get commits: %v, output: %s", err, outputStr)
+	}
+	lines := strings.Split(outputStr, "\n")
+	commits := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			commits = append(commits, line)
+		}
+	}
+	return commits
+}
+
+// GetLatestCommit gets the latest commit hash
+// Uses timeout to prevent hangs when accessing Git through FUSE mount
+// Accesses Git directory through cache directory to avoid FUSE deadlocks
+// findCacheDirFn is a function to find cache directory (e.g., cache.FindCacheDirectoryForMount)
+// This avoids import cycle: testings doesn't import cache, caller passes the function
+func GetLatestCommit(t *testing.T, mountPoint string, gitofsName string, findCacheDirFn func(string) (string, error)) string {
+	t.Helper()
+
+	// Normalize mount point path
+	absMountPoint, err := filepath.Abs(mountPoint)
+	if err != nil {
+		Failf(t, "Invalid mount point: %v", err)
+		return ""
+	}
+
+	// Resolve symlinks
+	if resolvedPath, err := filepath.EvalSymlinks(absMountPoint); err == nil {
+		absMountPoint = resolvedPath
+	}
+
+	// Find cache directory using provided function (avoids import cycle)
+	cacheDir, err := findCacheDirFn(absMountPoint)
+	if err != nil {
+		Failf(t, "Failed to find cache directory for mount point %s: %v", mountPoint, err)
+		return ""
+	}
+
+	// Access Git directory through cache directory, not mount point
+	// Git repository is at .root/.gitofs/.git relative to the session directory
+	// (all files in mount point are stored under .root in the cache)
+	cachePath := filepath.Join(cacheDir, rootName)
+	gitDir := filepath.Join(cachePath, gitofsName, ".git")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Use cache path (.root) as working directory for read-only Git operations (avoids FUSE)
+	cmd := exec.CommandContext(ctx, "git", "--git-dir", gitDir, "-C", cachePath, "log", "--oneline", "-1", "--format=%H")
+	output, err := cmd.CombinedOutput()
+	outputStr := string(output)
+	if isCommitEmpty(outputStr) {
+		return ""
+	}
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			Failf(t, "Git log command timed out after 10s when accessing %s. This may indicate a FUSE deadlock.", gitDir)
+		}
+		Failf(t, "Failed to get commit hash: %v, output: %s", err, outputStr)
+	}
+
+	return strings.TrimSpace(outputStr)
+}
+
+// WaitForAutoCommit waits for auto-commit to complete (idle timeout + safety window)
+// Uses default timing: 30s idle timeout + 5s safety window = 35s total
+// For faster tests, use NewTestFilesystemWithGitConfig with shorter timeouts
+func WaitForAutoCommit() {
+	// Default idle timeout is 30s, safety window is 5s, so wait 35s for safety
+	time.Sleep(35 * time.Second)
+}
+
+// WaitForAutoCommitWithTiming waits for auto-commit with custom timing
+// Useful when using NewTestFilesystemWithGitConfig with custom timeouts
+func WaitForAutoCommitWithTiming(idleTimeout, safetyWindow time.Duration) {
+	// Wait for idle timeout + safety window + small buffer
+	totalWait := idleTimeout + safetyWindow + (1 * time.Second)
+	time.Sleep(totalWait)
+}
+
+// RestorePath restores a path to a specific commit using shadowfs CLI
+// Uses a timeout to prevent hangs
+func RestorePath(t *testing.T, binaryPath, mountPoint, relPath, commitHash string) {
+	t.Helper()
+	t.Logf("RestoreFile: Starting restore command: %s version restore --mount-point %s --path %s %s", binaryPath, mountPoint, relPath, commitHash)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, binaryPath, "version", "restore", "--mount-point", mountPoint, "--path", relPath, commitHash)
+	// Inherit environment variables (including SHADOWFS_LOG_LEVEL for debug mode)
+	cmd.Env = os.Environ()
+
+	// Capture both stdout and stderr separately for better debugging
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	t.Logf("RestoreFile: Executing restore command...")
+	err := cmd.Run()
+
+	// Always log output for debugging
+	if stdout.Len() > 0 {
+		t.Logf("RestoreFile stdout: %s", stdout.String())
+	}
+	if stderr.Len() > 0 {
+		t.Logf("RestoreFile stderr: %s", stderr.String())
+	}
+
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			Failf(t, "Restore command timed out after 30s: %v, stdout: %s, stderr: %s", err, stdout.String(), stderr.String())
+		}
+		Failf(t, "Restore command failed: %v, stdout: %s, stderr: %s", err, stdout.String(), stderr.String())
+	}
+	t.Logf("RestoreFile: Restore command completed successfully")
+}
+
+// RestoreDirectory restores a directory to a specific commit using shadowfs CLI
+// Uses a timeout to prevent hangs
+func RestoreDirectory(t *testing.T, binaryPath, mountPoint, relPath, commitHash string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, binaryPath, "version", "restore", "--mount-point", mountPoint, "--dir", relPath, commitHash)
+	// Inherit environment variables (including SHADOWFS_LOG_LEVEL for debug mode)
+	cmd.Env = os.Environ()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			Failf(t, "Restore command timed out after 30s: %v, output: %s", err, string(output))
+		}
+		Failf(t, "Restore command failed: %v, output: %s", err, string(output))
+	}
+}
+
+func ListVersion(t *testing.T, binaryPath, mountPoint string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, binaryPath, "version", "list", "--mount-point", mountPoint)
+	cmd.Env = os.Environ()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		Failf(t, "List version command failed: %v, output: %s", err, string(output))
+	}
+	return string(output)
+}
+
+// RestoreWorkspace restores entire workspace to a specific commit using shadowfs CLI
+// Uses a timeout to prevent hangs
+func RestoreWorkspace(t *testing.T, binaryPath, mountPoint, commitHash string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second) // Longer timeout for workspace restore
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, binaryPath, "version", "restore", "--mount-point", mountPoint, commitHash)
+	// Inherit environment variables (including SHADOWFS_LOG_LEVEL for debug mode)
+	cmd.Env = os.Environ()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			Failf(t, "Restore command timed out after 60s: %v, output: %s", err, string(output))
+		}
+		Failf(t, "Restore command failed: %v, output: %s", err, string(output))
+	}
+}
+
+func isCommitEmpty(str string) bool {
+	return strings.Contains(str, "No commits")
+}
+
+// GetAllCommitsFS gets all commit hashes for this filesystem
+// Uses the same CLI command that the real CLI uses (shadowfs version log)
+func (fs *TestFilesystem) GetAllCommitsFS() []string {
+	// Use CLI command to avoid import cycle (testings can't import parent fs package)
+	// This uses the same code path as the real CLI: shadowfs version log --format=%H
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, fs.binaryPath, "version", "log", "--mount-point", fs.mountPoint, "--format=%H", "--reverse")
+	env := os.Environ()
+	cmd.Env = env
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	outputStr := stdout.String()
+	stderrStr := stderr.String()
+
+	if isCommitEmpty(stderrStr) || isCommitEmpty(outputStr) {
+		return []string{}
+	}
+
+	if err != nil {
+		// Check if it's "no commits" error (this is OK)
+		Failf(fs.t, "Failed to get commits: %v, stderr: %s", err, stderrStr)
+		return []string{}
+	}
+
+	// Parse output: each line is a commit hash
+	lines := strings.Split(outputStr, "\n")
+	commits := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			commits = append(commits, line)
+		}
+	}
+	return commits
+}
+
+// GetLatestCommitFS gets the latest commit hash for this filesystem
+// Uses the same CLI command that the real CLI uses (shadowfs version log --limit=1)
+func (fs *TestFilesystem) GetLatestCommitFS() string {
+	// Use CLI command to avoid import cycle (testings can't import parent fs package)
+	// This uses the same code path as the real CLI: shadowfs version log --format=%H --limit=1
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, fs.binaryPath, "version", "log", "--mount-point", fs.mountPoint, "--format=%H", "--limit=1")
+	env := os.Environ()
+	cmd.Env = env
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	outputStr := stdout.String()
+	stderrStr := stderr.String()
+
+	if isCommitEmpty(stderrStr) || isCommitEmpty(outputStr) {
+		return ""
+	}
+
+	if err != nil {
+		Failf(fs.t, "Failed to get latest commit: %v, stderr: %s", err, stderrStr)
+		return ""
+	}
+
+	return strings.TrimSpace(outputStr)
+}
+
+// WriteFileAndWait writes content and waits for auto-commit
+func (fs *TestFilesystem) WriteFileInMountAndWait(relPath string, content []byte) {
+	fs.WriteFileInMount(relPath, content)
+	WaitForAutoCommit()
+}
+
+// RenameAndWait renames and waits for auto-commit
+func (fs *TestFilesystem) RenameAndWait(oldPath, newPath string) {
+	fs.Rename(oldPath, newPath)
+	WaitForAutoCommit()
+}
+
+// RemoveFileAndWait removes file and waits for auto-commit
+func (fs *TestFilesystem) RemoveFileAndWait(relPath string) {
+	fs.RemoveFile(relPath)
+	WaitForAutoCommit()
+}
+
+// RestoreFileFS restores a file to a specific commit
+func (fs *TestFilesystem) RestorePathFS(relPath, commitHash string) {
+	RestorePath(fs.t, fs.binaryPath, fs.mountPoint, relPath, commitHash)
+}
+
+// RestoreWorkspaceFS restores entire workspace to a specific commit
+func (fs *TestFilesystem) RestoreWorkspaceFS(commitHash string) {
+	RestoreWorkspace(fs.t, fs.binaryPath, fs.mountPoint, commitHash)
+}
+
+func (fs *TestFilesystem) ListVersionFS() string {
+	return ListVersion(fs.t, fs.binaryPath, fs.mountPoint)
 }

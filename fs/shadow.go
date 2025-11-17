@@ -3,15 +3,19 @@ package fs
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
 	"github.com/pleclech/shadowfs/fs/cache"
+	"github.com/pleclech/shadowfs/fs/ipc"
 	"github.com/pleclech/shadowfs/fs/operations"
 	"github.com/pleclech/shadowfs/fs/pathutil"
 	"github.com/pleclech/shadowfs/fs/rootinit"
@@ -52,6 +56,19 @@ type ShadowNode struct {
 
 	// Track recently truncated files to prevent COW after truncation
 	truncatedFiles map[string]bool
+
+	// Track dirty files with reference count
+	// ref count = number of open handles (write + read handles)
+	// Uses mount point paths (not cache paths) because what's dirty is what's visible at the mount point
+	dirtyFiles      map[string]int // mount point path -> number of open handles
+	dirtyFilesMutex sync.RWMutex
+
+	// Track whether write handle has closed for dirty files
+	// Used to distinguish write handle closing from read handle closing when count becomes 0
+	dirtyFilesWriteClosed map[string]bool // mount point path -> write handle closed
+
+	// IPC server for CLI communication (optional)
+	ipcServer *ipc.ControlServer
 }
 
 func (n *ShadowNode) GetMountPoint() string {
@@ -82,6 +99,194 @@ func (n *ShadowNode) getServer() *fuse.Server {
 		}
 	}
 	return nil
+}
+
+// StartIPCServer starts the IPC server for CLI communication
+// This should be called after mount in main.go
+// Works in both daemon and non-daemon mode
+func (n *ShadowNode) StartIPCServer() error {
+	// Only start IPC server on root node
+	if n.mountPoint == "" || n.mountID == "" {
+		return fmt.Errorf("IPC server can only be started on root node")
+	}
+
+	socketPath, err := cache.GetSocketPath(n.mountID)
+	if err != nil {
+		return fmt.Errorf("failed to get socket path: %w", err)
+	}
+
+	// Ensure daemon directory exists (needed for non-daemon mode)
+	daemonDir, err := cache.GetDaemonDirPath()
+	if err != nil {
+		return fmt.Errorf("failed to get daemon directory: %w", err)
+	}
+	if err := os.MkdirAll(daemonDir, 0755); err != nil {
+		return fmt.Errorf("failed to create daemon directory: %w", err)
+	}
+
+	Debug("StartIPCServer: Creating IPC server for mountID=%s, mountPoint=%s, srcDir=%s, socketPath=%s", n.mountID, n.mountPoint, n.srcDir, socketPath)
+	server, err := ipc.NewControlServer(socketPath, n)
+	if err != nil {
+		return fmt.Errorf("failed to create IPC server: %w", err)
+	}
+
+	n.ipcServer = server
+	server.Start()
+	log.Printf("IPC server started: %s (mountID: %s)", socketPath, n.mountID)
+	return nil
+}
+
+// StopIPCServer stops the IPC server and removes the socket file
+// This should be called during cleanup before unmount
+func (n *ShadowNode) StopIPCServer() error {
+	if n.ipcServer == nil {
+		return nil
+	}
+
+	if err := n.ipcServer.Stop(); err != nil {
+		return fmt.Errorf("failed to stop IPC server: %w", err)
+	}
+
+	n.ipcServer = nil
+	return nil
+}
+
+// MarkDirty marks a file as dirty (public method for IPC)
+// This is called by IPC server when CLI restore operations mark files as dirty
+func (n *ShadowNode) MarkDirty(filePath string) {
+	n.markDirty(filePath)
+}
+
+// markDirty marks a file as dirty and sets ref count to 1 (the write handle)
+// filePath should be a mount point path (not cache path) because what's dirty is what's visible at the mount point
+// If file is already dirty, increments ref count instead of resetting
+// This handles the case where multiple writes occur before Release() is called
+func (n *ShadowNode) markDirty(filePath string) {
+	n.dirtyFilesMutex.Lock()
+	defer n.dirtyFilesMutex.Unlock()
+	if n.dirtyFiles == nil {
+		n.dirtyFiles = make(map[string]int)
+	}
+	if n.dirtyFilesWriteClosed == nil {
+		n.dirtyFilesWriteClosed = make(map[string]bool)
+	}
+	if count, exists := n.dirtyFiles[filePath]; exists {
+		// File already dirty - increment ref count (another write handle)
+		n.dirtyFiles[filePath] = count + 1
+		Debug("markDirty: Incremented ref count for %s to %d (already dirty)", filePath, count+1)
+	} else {
+		// File not dirty - set ref count to 1 (first write handle)
+		n.dirtyFiles[filePath] = 1
+		n.dirtyFilesWriteClosed[filePath] = false // Write handle is open
+		Debug("markDirty: Marked %s as dirty (ref count: 1)", filePath)
+	}
+}
+
+// incrementDirtyRef increments reference count when a new handle opens a dirty file
+// filePath should be a mount point path (not cache path)
+func (n *ShadowNode) incrementDirtyRef(filePath string) {
+	n.dirtyFilesMutex.Lock()
+	defer n.dirtyFilesMutex.Unlock()
+	if n.dirtyFiles == nil {
+		return
+	}
+	if count, exists := n.dirtyFiles[filePath]; exists {
+		n.dirtyFiles[filePath] = count + 1
+		Debug("incrementDirtyRef: Incremented ref count for %s to %d", filePath, count+1)
+	}
+}
+
+// decrementDirtyRef decrements reference count when a handle closes
+// filePath should be a mount point path (not cache path)
+// Returns true if dirty flag was cleared
+// When write handle closes (count was 1 → 0), keep entry with count 0 to allow reads that happen after
+// When read handle closes and count becomes 0 (count was 1 → 0), delete entry (write handle already closed)
+func (n *ShadowNode) decrementDirtyRef(filePath string) bool {
+	n.dirtyFilesMutex.Lock()
+	defer n.dirtyFilesMutex.Unlock()
+	if n.dirtyFiles == nil {
+		return false
+	}
+	if n.dirtyFilesWriteClosed == nil {
+		n.dirtyFilesWriteClosed = make(map[string]bool)
+	}
+	if count, exists := n.dirtyFiles[filePath]; exists {
+		oldCount := count
+		count--
+		if count < 0 {
+			// Shouldn't happen, but handle gracefully
+			delete(n.dirtyFiles, filePath)
+			delete(n.dirtyFilesWriteClosed, filePath)
+			Debug("decrementDirtyRef: Negative ref count for %s, clearing", filePath)
+			return true
+		} else if count == 0 {
+			writeClosed := n.dirtyFilesWriteClosed[filePath]
+			if !writeClosed && oldCount == 1 {
+				// Write handle closing (count was 1 → 0, write handle not yet marked closed)
+				// Keep entry with count 0 for pending reads
+				n.dirtyFiles[filePath] = 0
+				n.dirtyFilesWriteClosed[filePath] = true // Mark write handle closed
+				Debug("decrementDirtyRef: Write handle closed for %s, keeping entry (count=0) for pending reads", filePath)
+				return false
+			} else if writeClosed {
+				// Read handle closing and count becomes 0 (write handle already closed)
+				// Safe to delete - all handles closed
+				delete(n.dirtyFiles, filePath)
+				delete(n.dirtyFilesWriteClosed, filePath)
+				Debug("decrementDirtyRef: Last read handle closed for %s (write handle already closed), cleared dirty flag", filePath)
+				return true
+			} else {
+				// Shouldn't happen: count is 0 but write handle not closed and oldCount != 1
+				// Handle gracefully - keep entry
+				n.dirtyFiles[filePath] = 0
+				Debug("decrementDirtyRef: Unexpected state for %s (count=0, writeClosed=%v, oldCount=%d), keeping entry", filePath, writeClosed, oldCount)
+				return false
+			}
+		} else {
+			n.dirtyFiles[filePath] = count
+			Debug("decrementDirtyRef: Decremented ref count for %s from %d to %d", filePath, oldCount, count)
+			return false
+		}
+	}
+	return false
+}
+
+// isDirty checks if a file is dirty (has non-zero ref count)
+// filePath should be a mount point path (not cache path)
+func (n *ShadowNode) isDirty(filePath string) bool {
+	n.dirtyFilesMutex.RLock()
+	defer n.dirtyFilesMutex.RUnlock()
+	if n.dirtyFiles == nil {
+		return false
+	}
+	_, exists := n.dirtyFiles[filePath]
+	return exists
+}
+
+// checkDirtyAndIncrementRef atomically checks if file is dirty and increments ref count
+// filePath should be a mount point path (not cache path)
+// Returns true if file was dirty and ref count was incremented
+// This prevents race conditions where dirty flag is cleared between check and increment
+// Handles count 0 case: if count is 0, it means write handle closed but file was recently written
+func (n *ShadowNode) checkDirtyAndIncrementRef(filePath string) bool {
+	n.dirtyFilesMutex.Lock()
+	defer n.dirtyFilesMutex.Unlock()
+	if n.dirtyFiles == nil {
+		Debug("checkDirtyAndIncrementRef: dirtyFiles map is nil, checking for %s", filePath)
+		return false
+	}
+	// Debug: Log all dirty files to see what's stored
+	if len(n.dirtyFiles) > 0 {
+		Debug("checkDirtyAndIncrementRef: Current dirty files: %v", n.dirtyFiles)
+	}
+	if count, exists := n.dirtyFiles[filePath]; exists {
+		// File is dirty (even if count is 0, it means write handle closed but file was recently written)
+		n.dirtyFiles[filePath] = count + 1
+		Debug("checkDirtyAndIncrementRef: Found dirty file %s (count was %d), incremented to %d", filePath, count, count+1)
+		return true
+	}
+	Debug("checkDirtyAndIncrementRef: File %s not found in dirtyFiles map", filePath)
+	return false
 }
 
 func (n *ShadowNode) InvalidateEntry(ctx context.Context, name string) {
@@ -117,7 +322,11 @@ func (n *ShadowNode) InvalidateNegativeEntry(ctx context.Context, name string) {
 
 // InitGitManager initializes Git functionality for auto-versioning
 func (n *ShadowNode) InitGitManager(config GitConfig) error {
-	n.gitManager = NewGitManager(n.mountPoint, n.srcDir, config)
+	n.gitManager = NewGitManager(n.mountPoint, n.srcDir, n.cachePath, config, n.pathResolver, n.xattrMgr)
+
+	// Note: IPC client is set automatically in GetGitRepository() when called from CLI
+	// For FUSE context, files written through FUSE are automatically marked dirty in Write()
+	// so no IPC client is needed here
 
 	// Initialize Git repository
 	if err := n.gitManager.InitializeRepo(); err != nil {
@@ -181,17 +390,67 @@ func (n *ShadowNode) HandleWriteActivity(filePath string) {
 	}
 }
 
+// commitDeletion commits a file or directory deletion to git
+func (n *ShadowNode) commitDeletion(mountPointPath string) error {
+	if n.gitManager == nil || !n.gitManager.IsEnabled() {
+		return nil // Git disabled, skip
+	}
+
+	// Convert mount point path to relative path
+	relativePath := strings.TrimPrefix(mountPointPath, n.mountPoint)
+	relativePath = strings.TrimPrefix(relativePath, "/")
+	relativePath = strings.Trim(relativePath, "/")
+
+	if relativePath == "" {
+		return nil // Root path, skip
+	}
+
+	// Normalize path separators
+	relativePath = filepath.ToSlash(relativePath)
+
+	// Call GitManager's commitDeletion
+	return n.gitManager.commitDeletion(relativePath)
+}
+
+// commitDirectoryDeletionRecursive commits a directory deletion recursively to git
+func (n *ShadowNode) commitDirectoryDeletionRecursive(mountPointPath string) error {
+	if n.gitManager == nil || !n.gitManager.IsEnabled() {
+		return nil // Git disabled, skip
+	}
+
+	// Convert mount point path to relative path
+	relativePath := strings.TrimPrefix(mountPointPath, n.mountPoint)
+	relativePath = strings.TrimPrefix(relativePath, "/")
+	relativePath = strings.Trim(relativePath, "/")
+
+	if relativePath == "" {
+		return nil // Root path, skip
+	}
+
+	// Normalize path separators
+	relativePath = filepath.ToSlash(relativePath)
+
+	// Call GitManager's commitDirectoryDeletionRecursive
+	return n.gitManager.commitDirectoryDeletionRecursive(relativePath)
+}
+
 // CleanupGitManager cleans up Git resources and commits all pending changes
 func (n *ShadowNode) CleanupGitManager() {
 	if n.gitManager != nil {
 		// Stop accepting new commits
 		n.gitManager.Stop()
 
+		if n.activityTracker == nil {
+			return
+		}
+
 		// CRITICAL: Commit all pending changes before stopping timers to prevent data loss
 		if err := n.activityTracker.CommitAllPending(); err != nil {
 			Debug("Failed to commit pending changes on cleanup: %v", err)
 		}
+
 		n.activityTracker.StopIdleMonitoring()
+		n.activityTracker = nil
 	}
 }
 
@@ -831,6 +1090,98 @@ func (n *ShadowNode) Create(ctx context.Context, name string, flags uint32, mode
 	return ch, lf, 0, 0
 }
 
+func (n *ShadowNode) Flush(ctx context.Context, f fs.FileHandle, t *time.Time) syscall.Errno {
+	// If file was opened with DIRECT_IO, invalidate entry to clear FUSE cache
+	// This ensures reads after close see the updated content
+	p := n.FullPath(true)
+	cachePath := p
+	if !strings.HasPrefix(p, n.cachePath) {
+		cachePath = n.RebasePathUsingCache(p)
+	}
+
+	rebasedMountPath := n.RebasePathUsingMountPoint(cachePath)
+
+	// Get parent node and invalidate entry
+	// Note: NotifyContent and EntryNotify can block if called from within a FUSE operation handler,
+	// so we make them non-blocking by calling them in goroutines
+	// The dirty flag mechanism handles cache invalidation for reads, so this is best-effort
+	if inode := n.EmbeddedInode(); inode != nil {
+		// NotifyContent can block, so call it in a goroutine
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					// Ignore panics from NotifyContent - it's best-effort
+					Debug("Flush: NotifyContent panicked (ignored): %v", r)
+				}
+			}()
+			inode.NotifyContent(0, 0)
+		}()
+
+		_, parentInode := inode.Parent()
+		if parentInode != nil {
+			parentIno := parentInode.StableAttr().Ino
+			fileName := filepath.Base(rebasedMountPath)
+
+			server := n.getServer()
+			if server != nil {
+				// Invalidate directory entry - call in goroutine to avoid blocking
+				// The dirty flag mechanism ensures reads use DIRECT_IO when needed
+				go func() {
+					defer func() {
+						if r := recover(); r != nil {
+							// Ignore panics from EntryNotify - it's best-effort
+							Debug("Flush: EntryNotify panicked (ignored): %v", r)
+						}
+					}()
+					server.EntryNotify(parentIno, fileName)
+				}()
+			}
+		}
+	}
+
+	// Also update timestamps to trigger cache refresh
+	// CRITICAL: Use cache path, not mount point path, to avoid deadlock
+	// Calling os.Chtimes on mount point path triggers FUSE Setattr, which can deadlock
+	// when called from within a FUSE operation handler (Flush is called from Write)
+	if t == nil {
+		now := time.Now()
+		t = &now
+	}
+
+	// Update timestamps on cache file directly (bypasses FUSE, avoids deadlock)
+	if err := os.Chtimes(cachePath, *t, *t); err != nil {
+		// Log but don't fail - timestamp update is best-effort
+		Debug("Flush: Failed to update timestamps for %s: %v (ignored)", cachePath, err)
+	}
+
+	return 0
+}
+
+func (n *ShadowNode) Release(ctx context.Context, f fs.FileHandle) syscall.Errno {
+	p := n.FullPath(true)
+
+	// Resolve mount point path (not cache path) because what's dirty is what's visible at the mount point
+	mountPointPath := p
+	if strings.HasPrefix(p, n.cachePath) {
+		// p is a cache path, convert to mount point path
+		mountPointPath = n.RebasePathUsingMountPoint(p)
+	} else if !strings.HasPrefix(p, n.mountPoint) {
+		// p might be a source path, convert via cache path
+		cachePath := n.RebasePathUsingCache(p)
+		mountPointPath = n.RebasePathUsingMountPoint(cachePath)
+	}
+
+	// Decrement reference count
+	// If count reaches 0, keep entry (don't delete) to allow reads that happen after write handle closes
+	// Entry will be deleted when a read handle closes and count is 0 (meaning write handle already closed)
+	cleared := n.decrementDirtyRef(mountPointPath)
+	if cleared {
+		Debug("Release: Cleared dirty flag for %s (all handles closed)", mountPointPath)
+	}
+
+	return 0
+}
+
 func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
 	// Get mount point path from inode path (not from mirrorPath which might be source or cache)
 	// This ensures we always resolve from the mount point perspective
@@ -874,6 +1225,84 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 		if resolveErrno != 0 {
 			return nil, 0, resolveErrno
 		}
+
+		// CRITICAL: Commit original state from source BEFORE any writes happen
+		// This ensures the first version is preserved even when COW is skipped
+		Debug("Open(write): Checking for original state commit: mountPoint=%s, cachePath=%s, sourcePath=%s", mountPointPath, cachePath, sourcePath)
+		if n.gitManager != nil && n.gitManager.IsEnabled() && sourcePath != "" {
+			// Check if file is independent (if independent, no original state to commit)
+			isIndependent := false
+			// Check if file exists in cache first (xattr only exists if file exists)
+			var cacheSt syscall.Stat_t
+			fileExistsInCache := syscall.Lstat(cachePath, &cacheSt) == nil
+			if fileExistsInCache && n.xattrMgr != nil {
+				attr, exists, errno := n.xattrMgr.GetStatus(cachePath)
+				if errno == 0 && exists && attr != nil {
+					isIndependent = attr.CacheIndependent
+					Debug("Open(write): File exists in cache, isIndependent=%v", isIndependent)
+				} else {
+					Debug("Open(write): File exists in cache but no xattr or error: exists=%v, errno=%v", exists, errno)
+				}
+			} else if !fileExistsInCache {
+				Debug("Open(write): File does not exist in cache yet, assuming not independent")
+			}
+
+			// Only commit original state if file is NOT independent and resolves to source
+			if !isIndependent {
+				// Check if source file exists
+				var sourceSt syscall.Stat_t
+				if err := syscall.Lstat(sourcePath, &sourceSt); err == nil {
+					// Flush commit queue to ensure any pending commits complete
+					if err := n.gitManager.flushCommitQueue(); err != nil {
+						Debug("Open(write): Failed to flush commit queue: %v (continuing)", err)
+						// Continue even if flush fails - don't block Open()
+					}
+
+					// Get relative path for Git
+					relativePath, err := n.gitManager.normalizePath(mountPointPath)
+					if err == nil {
+						// Check if file hasn't been committed yet
+						if !n.gitManager.hasFileBeenCommitted(relativePath) {
+							Debug("Open(write): Copying original state from source before writes: %s (source: %s)", relativePath, sourcePath)
+							// Get source file mode for CopyFile
+							var sourceSt syscall.Stat_t
+							mode := uint32(0644) // Default fallback
+							if err := syscall.Lstat(sourcePath, &sourceSt); err == nil {
+								mode = uint32(sourceSt.Mode)
+							} else {
+								Debug("Open(write): Failed to stat source file %s, using default mode 0644: %v", sourcePath, err)
+							}
+							if errno := n.helpers.CopyFile(sourcePath, cachePath, mode); errno != 0 {
+								Debug("Open(write): Failed to copy file %s to %s: %v (continuing)", sourcePath, cachePath, errno)
+								return nil, 0, errno
+							}
+							n.setCacheIndependent(cachePath)
+
+							Debug("Open(write): Committing original state from source before writes: %s (source: %s)", relativePath, sourcePath)
+							// Commit original state synchronously before any writes
+							if err := n.gitManager.commitOriginalStateSync(relativePath); err != nil {
+								// Log but don't fail - Open() should proceed even if commit fails
+								Debug("Open(write): Failed to commit original state for %s: %v (continuing)", relativePath, err)
+							} else {
+								Debug("Open(write): Successfully committed original state for %s", relativePath)
+							}
+						} else {
+							Debug("Open(write): File %s already committed, skipping original state commit", relativePath)
+						}
+					} else {
+						Debug("Open(write): Failed to normalize path %s: %v (skipping original state commit)", mountPointPath, err)
+					}
+				} else {
+					Debug("Open(write): Source file %s does not exist, skipping original state commit", sourcePath)
+				}
+			} else {
+				Debug("Open(write): File %s is independent, skipping original state commit", mountPointPath)
+			}
+		}
+
+		// Start activity tracking for write operations
+		// This ensures we track writes and start the idle timer
+		n.HandleWriteActivity(mountPointPath)
 	} else {
 		// For read operations, use ResolveForRead
 		cachePath, sourcePath, isIndependent, resolveErrno = n.pathResolver.ResolveForRead(mountPointPath)
@@ -896,14 +1325,8 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 			var sourceSt syscall.Stat_t
 			if err := syscall.Lstat(sourcePath, &sourceSt); err == nil && sourceSt.Size > 0 {
 				// Source file exists and has content - copy it to cache before opening for append
-				if n.helpers != nil {
-					if errno := n.helpers.CopyFile(sourcePath, cachedPath); errno != 0 {
-						return nil, 0, errno
-					}
-				} else {
-					if errno := n.copyFileSimple(sourcePath, cachedPath, uint32(sourceSt.Mode)); errno != 0 {
-						return nil, 0, errno
-					}
+				if errno := n.helpers.CopyFile(sourcePath, cachedPath, uint32(sourceSt.Mode)); errno != 0 {
+					return nil, 0, errno
 				}
 				copyOnWriteHappened = true
 			}
@@ -949,14 +1372,8 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 			var sourceSt syscall.Stat_t
 			if err := syscall.Lstat(sourcePath, &sourceSt); err == nil && sourceSt.Size > 0 {
 				// Source file exists and has content - copy it to cache before opening for append
-				if n.helpers != nil {
-					if errno := n.helpers.CopyFile(sourcePath, cachedPath); errno != 0 {
-						return nil, 0, errno
-					}
-				} else {
-					if errno := n.copyFileSimple(sourcePath, cachedPath, uint32(sourceSt.Mode)); errno != 0 {
-						return nil, 0, errno
-					}
+				if errno := n.helpers.CopyFile(sourcePath, cachedPath, uint32(sourceSt.Mode)); errno != 0 {
+					return nil, 0, errno
 				}
 				// File already exists in cache now, don't need O_CREAT
 				p = cachedPath
@@ -1015,6 +1432,7 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 
 	// If O_TRUNC was requested, truncate the file now
 	// We do this after opening because we stripped O_TRUNC from flags
+	// Note: Original state commit is now handled earlier in Open() for all write operations
 	if hasTrunc && !hasAppend {
 		if err := syscall.Ftruncate(f, 0); err != nil {
 			syscall.Close(f)
@@ -1057,13 +1475,29 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 	fuseFlags = 0
 
 	// Set appropriate cache flags based on file access pattern
-	// For write operations, use direct I/O to prevent aggressive caching
-	// This is especially important for type replacement scenarios
 	if forceCache {
+		// Write operation - always use DIRECT_IO
 		fuseFlags |= fuse.FOPEN_DIRECT_IO
+		// Note: markDirty will be called in Write(), not here
 	} else {
-		// For read-only operations, keep cache for better performance
-		fuseFlags |= fuse.FOPEN_KEEP_CACHE
+		// Read operation
+		// Use mount point path (not cache path) because what's dirty is what's visible at the mount point
+		// mountPointPath is already resolved above (line 1038-1053)
+
+		// Debug: Log the mount point path being checked
+		Debug("Open(read): Checking dirty flag for mountPointPath=%s (cachePath=%s)", mountPointPath, cachePath)
+
+		// Atomically check if dirty and increment ref count
+		// This prevents race conditions where dirty flag is cleared between check and increment
+		if n.checkDirtyAndIncrementRef(mountPointPath) {
+			// File is dirty - use DIRECT_IO for fresh read
+			fuseFlags |= fuse.FOPEN_DIRECT_IO
+			Debug("Open(read): File is dirty, using DIRECT_IO for %s", mountPointPath)
+		} else {
+			// File is clean - use cache for performance
+			fuseFlags |= fuse.FOPEN_KEEP_CACHE
+			Debug("Open(read): File is clean, using KEEP_CACHE for %s", mountPointPath)
+		}
 	}
 
 	// Note: Activity tracking happens in Write() method after actual writes occur
@@ -1128,9 +1562,34 @@ func (n *ShadowNode) Rename(ctx context.Context, name string, newParent fs.Inode
 	}
 
 	// Perform rename using operation module
-	errno := n.renameOp.Rename(sourcePath, destPath, flags, n.copyFileSimple)
+	// Create wrapper function that uses helpers.CopyFile
+	// The rename operation expects a function with signature:
+	// func(srcPath, destPath string, mode uint32) syscall.Errno
+	copyFileWrapper := func(srcPath, destPath string, mode uint32) syscall.Errno {
+		// Get source file mode if not provided (mode might be 0)
+		if mode == 0 {
+			var sourceSt syscall.Stat_t
+			if err := syscall.Lstat(srcPath, &sourceSt); err == nil {
+				mode = uint32(sourceSt.Mode)
+			} else {
+				mode = 0644 // Default fallback
+			}
+		}
+		return n.helpers.CopyFile(srcPath, destPath, mode)
+	}
+	errno := n.renameOp.Rename(sourcePath, destPath, flags, copyFileWrapper)
 	if errno != 0 {
 		return errno
+	}
+
+	// Commit rename metadata to git
+	if n.gitManager != nil && n.gitManager.IsEnabled() {
+		// Convert source paths to relative paths for git commit
+		// sourcePath and destPath are absolute source paths
+		if err := n.gitManager.commitRenameMetadata(sourcePath, destPath); err != nil {
+			log.Printf("Rename: Failed to commit rename metadata: %v", err)
+			// Don't fail the rename operation if metadata commit fails
+		}
 	}
 
 	// Update child node's mirrorPath after successful rename
@@ -1180,11 +1639,6 @@ func (n *ShadowNode) createMirroredDir(path string) (string, error) {
 
 func (n *ShadowNode) CreateMirroredFileOrDir(path string) (string, error) {
 	return cache.CreateMirroredFileOrDir(path, n.cachePath, n.srcDir)
-}
-
-// copyFileSimple copies a file from source to destination (fallback when helpers not available)
-func (n *ShadowNode) copyFileSimple(srcPath, destPath string, mode uint32) syscall.Errno {
-	return cache.CopyFileSimple(srcPath, destPath, mode)
 }
 
 func (n *ShadowNode) Unlink(ctx context.Context, name string) syscall.Errno {
@@ -1313,6 +1767,13 @@ func (n *ShadowNode) Unlink(ctx context.Context, name string) syscall.Errno {
 
 		// Remove child inode from FUSE tree
 		n.RmChild(name)
+
+		// Commit deletion to git (best-effort, don't fail unlink if commit fails)
+		mountPointPath := pathutil.RebaseToMountPoint(mirrorPath, n.mountPoint, n.cachePath)
+		if err := n.commitDeletion(mountPointPath); err != nil {
+			log.Printf("Unlink: Failed to commit deletion for %s: %v (unlink succeeded)", mountPointPath, err)
+			// Don't fail unlink operation - commit is best-effort
+		}
 
 		return 0
 	}
@@ -1588,6 +2049,10 @@ func newShadowNode(rootData *fs.LoopbackRoot, parent *fs.Inode, _ string, _ *sys
 			n.server = parentNode.server
 			// Inherit truncated files map from parent (for COW prevention)
 			n.truncatedFiles = parentNode.truncatedFiles
+			// Inherit dirty files map from parent (shared across all nodes)
+			n.dirtyFiles = parentNode.dirtyFiles
+			// Inherit write closed tracking map from parent (shared across all nodes)
+			n.dirtyFilesWriteClosed = parentNode.dirtyFilesWriteClosed
 			// Inherit helpers from parent
 			if parentNode.helpers != nil {
 				n.helpers = parentNode.helpers
@@ -1595,6 +2060,13 @@ func newShadowNode(rootData *fs.LoopbackRoot, parent *fs.Inode, _ string, _ *sys
 				n.helpers = NewShadowNodeHelpers(n)
 			}
 		}
+	}
+
+	// CRITICAL: Ensure helpers is always initialized
+	// This guarantees helpers is never nil, allowing us to remove defensive checks
+	// Even if parent is nil or inheritance fails, helpers will be available
+	if n.helpers == nil {
+		n.helpers = NewShadowNodeHelpers(n)
 	}
 
 	return n
@@ -1682,6 +2154,10 @@ func NewShadowRoot(inMountPoint, inSrcDir, cacheBaseDir string) (fs.InodeEmbedde
 
 	// Initialize truncatedFiles map at root (shared across all nodes)
 	root.truncatedFiles = make(map[string]bool)
+	// Initialize dirtyFiles map at root (shared across all nodes)
+	root.dirtyFiles = make(map[string]int)
+	// Initialize dirtyFilesWriteClosed map at root (shared across all nodes)
+	root.dirtyFilesWriteClosed = make(map[string]bool)
 
 	return root, nil
 }

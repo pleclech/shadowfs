@@ -2,6 +2,7 @@ package fs
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -89,18 +90,31 @@ func TestValidateGitRepository(t *testing.T) {
 		tu.Failf(t, "Failed to create git dir: %v", err)
 	}
 
-	// Test with missing HEAD
+	// Test with missing HEAD (invalid repository)
 	if err := ValidateGitRepository(tempDir); err == nil {
 		tu.Failf(t, "Expected error for missing HEAD file")
 	}
 
-	// Create HEAD file
+	// Create HEAD file (still not a valid Git repo without git init)
 	headFile := filepath.Join(gitDir, "HEAD")
 	if err := os.WriteFile(headFile, []byte("ref: refs/heads/main\n"), 0644); err != nil {
 		tu.Failf(t, "Failed to create HEAD file: %v", err)
 	}
 
-	// Test with valid repository
+	// Test with HEAD but not a valid Git repository (git rev-parse will fail)
+	if err := ValidateGitRepository(tempDir); err == nil {
+		tu.Failf(t, "Expected error for invalid git repository (not initialized with git init)")
+	}
+
+	// Create a proper Git repository using git init
+	gitInitPath := filepath.Join(tempDir, ".gitofs")
+	cmd := exec.Command("git", "init", gitInitPath, "--template=")
+	if err := cmd.Run(); err != nil {
+		t.Skipf("Git not available, skipping test: %v", err)
+		return
+	}
+
+	// Test with valid repository (properly initialized with git init)
 	if err := ValidateGitRepository(tempDir); err != nil {
 		tu.Failf(t, "Expected no error for valid repository, got: %v", err)
 	}

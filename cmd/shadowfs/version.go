@@ -65,9 +65,14 @@ func runVersionList(args []string) {
 
 	gm, err := shadowfs.GetGitRepository(*mountPoint)
 	if err != nil {
-		// Add helpful suggestion for git repository not found
-		if strings.Contains(err.Error(), "git repository not found") {
+		// Provide helpful error messages based on error type
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "git repository directory not found") || strings.Contains(errMsg, "git repository not found") {
 			log.Fatalf("Failed to get git repository: %v\n\nTip: Did you enable git with --auto-git flag? Try: shadowfs --auto-git %s <srcdir>", err, *mountPoint)
+		} else if strings.Contains(errMsg, "git repository locked") {
+			log.Fatalf("Failed to get git repository: %v\n\nTip: Git operations may be in progress. Wait a moment and try again.", err)
+		} else if strings.Contains(errMsg, "HEAD file not found") || strings.Contains(errMsg, "not recognized by Git") {
+			log.Fatalf("Failed to get git repository: %v\n\nTip: Git repository may not be fully initialized. Try restarting shadowfs.", err)
 		}
 		log.Fatalf("Failed to get git repository: %v", err)
 	}
@@ -133,9 +138,14 @@ func runVersionDiff(args []string) {
 
 	gm, err := shadowfs.GetGitRepository(*mountPoint)
 	if err != nil {
-		// Add helpful suggestion for git repository not found
-		if strings.Contains(err.Error(), "git repository not found") {
+		// Provide helpful error messages based on error type
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "git repository directory not found") || strings.Contains(errMsg, "git repository not found") {
 			log.Fatalf("Failed to get git repository: %v\n\nTip: Did you enable git with --auto-git flag? Try: shadowfs --auto-git %s <srcdir>", err, *mountPoint)
+		} else if strings.Contains(errMsg, "git repository locked") {
+			log.Fatalf("Failed to get git repository: %v\n\nTip: Git operations may be in progress. Wait a moment and try again.", err)
+		} else if strings.Contains(errMsg, "HEAD file not found") || strings.Contains(errMsg, "not recognized by Git") {
+			log.Fatalf("Failed to get git repository: %v\n\nTip: Git repository may not be fully initialized. Try restarting shadowfs.", err)
 		}
 		log.Fatalf("Failed to get git repository: %v", err)
 	}
@@ -205,13 +215,56 @@ func runVersionDiff(args []string) {
 }
 
 func runVersionRestore(args []string) {
+	initLogger()
+
+	// Immediate output to verify command started
+	log.Printf("Restore command started")
+
 	fs := flag.NewFlagSet("version restore", flag.ExitOnError)
 	mountPoint := fs.String("mount-point", "", "Mount point path (required)")
-	filePath := fs.String("file", "", "Restore single file")
-	dirPath := fs.String("dir", "", "Restore directory tree")
-	workspace := fs.Bool("workspace", false, "Restore entire workspace")
 	force := fs.Bool("force", false, "Overwrite uncommitted changes")
-	fs.Parse(args)
+
+	// Collect all --path flags manually (Go flag package doesn't support multiple flags with same name)
+	// Filter out --path flags from args before parsing to avoid flag.Parse errors
+	var paths []string
+	var filteredArgs []string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--path" && i+1 < len(args) {
+			// Handle --path value format
+			value := args[i+1]
+			// Support comma-separated values
+			if strings.Contains(value, ",") {
+				for _, p := range strings.Split(value, ",") {
+					p = strings.TrimSpace(p)
+					if p != "" {
+						paths = append(paths, p)
+					}
+				}
+			} else {
+				paths = append(paths, value)
+			}
+			i++ // Skip the value (don't add either --path or its value to filteredArgs)
+		} else if strings.HasPrefix(args[i], "--path=") {
+			// Handle --path=value format
+			value := strings.TrimPrefix(args[i], "--path=")
+			if strings.Contains(value, ",") {
+				for _, p := range strings.Split(value, ",") {
+					p = strings.TrimSpace(p)
+					if p != "" {
+						paths = append(paths, p)
+					}
+				}
+			} else {
+				paths = append(paths, value)
+			}
+			// Don't add --path=value to filteredArgs
+		} else {
+			// Keep other args for flag parsing
+			filteredArgs = append(filteredArgs, args[i])
+		}
+	}
+
+	fs.Parse(filteredArgs)
 
 	if *mountPoint == "" {
 		log.Fatal("--mount-point is required")
@@ -223,49 +276,64 @@ func runVersionRestore(args []string) {
 
 	gm, err := shadowfs.GetGitRepository(*mountPoint)
 	if err != nil {
-		// Add helpful suggestion for git repository not found
-		if strings.Contains(err.Error(), "git repository not found") {
+		// Provide helpful error messages based on error type
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "git repository directory not found") || strings.Contains(errMsg, "git repository not found") {
 			log.Fatalf("Failed to get git repository: %v\n\nTip: Did you enable git with --auto-git flag? Try: shadowfs --auto-git %s <srcdir>", err, *mountPoint)
+		} else if strings.Contains(errMsg, "git repository locked") {
+			log.Fatalf("Failed to get git repository: %v\n\nTip: Git operations may be in progress. Wait a moment and try again.", err)
+		} else if strings.Contains(errMsg, "HEAD file not found") || strings.Contains(errMsg, "not recognized by Git") {
+			log.Fatalf("Failed to get git repository: %v\n\nTip: Git repository may not be fully initialized. Try restarting shadowfs.", err)
 		}
 		log.Fatalf("Failed to get git repository: %v", err)
 	}
 
+	// Get commit hash from positional args (first arg after flags, --path flags already filtered)
 	if len(fs.Args()) == 0 {
 		log.Fatal("Commit hash is required")
 	}
-	commitHash := fs.Args()[0]
+	commitHashInput := fs.Args()[0]
 
-	// Validate commit hash
+	// Resolve commit hash (handles relative commits like HEAD~N, HEAD^, etc.)
+	commitHash, err := gm.ResolveCommitHash(commitHashInput)
+	if err != nil {
+		log.Fatalf("Invalid commit hash or reference: %v", err)
+	}
+
+	// Validate commit hash exists
 	if err := validateCommitHash(gm, commitHash); err != nil {
 		log.Fatalf("Invalid commit hash: %v", err)
 	}
 
-	// Determine what to restore (precedence: file > dir > workspace)
-	var paths []string
-	if *filePath != "" {
-		paths = []string{*filePath}
-	} else if *dirPath != "" {
-		paths = []string{*dirPath}
-	} else if *workspace {
-		// Restore entire workspace
-		paths = []string{"."}
-	} else {
-		// Default to workspace if nothing specified
-		paths = []string{"."}
+	// Check for uncommitted changes if --force is not set
+	if !*force {
+		uncommitted, err := gm.StatusPorcelain()
+		if err == nil && len(uncommitted) > 0 {
+			log.Fatalf("Uncommitted changes detected. Use --force to overwrite.")
+		}
 	}
 
-	// Use GitManager's Checkout method
-	if err := gm.Checkout(commitHash, paths, *force, os.Stdout, os.Stderr); err != nil {
+	// Use step-by-step restoration engine
+	log.Printf("Starting restore operation: commit=%s, paths=%v", commitHash, paths)
+	if err := gm.RestoreCommit(commitHash, paths); err != nil {
 		log.Fatalf("Failed to restore: %v", err)
 	}
 
-	fmt.Printf("Successfully restored to commit %s\n", commitHash)
+	log.Printf("Restore operation completed successfully")
+	if len(paths) == 0 {
+		fmt.Printf("Successfully restored entire workspace to commit %s\n", commitHash)
+	} else {
+		fmt.Printf("Successfully restored %d path(s) to commit %s\n", len(paths), commitHash)
+	}
 }
 
 func runVersionLog(args []string) {
 	fs := flag.NewFlagSet("version log", flag.ExitOnError)
 	mountPoint := fs.String("mount-point", "", "Mount point path (required)")
 	pathFlags := fs.String("path", "", "Filter by file/directory path or glob pattern (can be used multiple times)")
+	formatFlag := fs.String("format", "", "Custom format string (e.g., %H for full hash, %h for short hash)")
+	limitFlag := fs.Int("limit", 0, "Limit number of commits shown")
+	reverseFlag := fs.Bool("reverse", false, "Reverse order of commits")
 	oneline := fs.Bool("oneline", false, "One line per commit")
 	graph := fs.Bool("graph", false, "Show commit graph")
 	stat := fs.Bool("stat", false, "Show file statistics")
@@ -281,9 +349,14 @@ func runVersionLog(args []string) {
 
 	gm, err := shadowfs.GetGitRepository(*mountPoint)
 	if err != nil {
-		// Add helpful suggestion for git repository not found
-		if strings.Contains(err.Error(), "git repository not found") {
+		// Provide helpful error messages based on error type
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "git repository directory not found") || strings.Contains(errMsg, "git repository not found") {
 			log.Fatalf("Failed to get git repository: %v\n\nTip: Did you enable git with --auto-git flag? Try: shadowfs --auto-git %s <srcdir>", err, *mountPoint)
+		} else if strings.Contains(errMsg, "git repository locked") {
+			log.Fatalf("Failed to get git repository: %v\n\nTip: Git operations may be in progress. Wait a moment and try again.", err)
+		} else if strings.Contains(errMsg, "HEAD file not found") || strings.Contains(errMsg, "not recognized by Git") {
+			log.Fatalf("Failed to get git repository: %v\n\nTip: Git repository may not be fully initialized. Try restarting shadowfs.", err)
 		}
 		log.Fatalf("Failed to get git repository: %v", err)
 	}
@@ -318,10 +391,20 @@ func runVersionLog(args []string) {
 	// Add --name-only by default unless --oneline is used (oneline is more compact)
 	options := shadowfs.LogOptions{
 		Oneline:  *oneline,
+		Reverse:  *reverseFlag,
 		Graph:    *graph,
 		Stat:     *stat,
 		NameOnly: !*oneline, // Show file names unless oneline is requested
 		Paths:    expandedPaths,
+	}
+	// Override format if specified
+	if *formatFlag != "" {
+		options.Format = *formatFlag
+		options.NameOnly = false // Disable name-only when custom format is used
+	}
+	// Override limit if specified
+	if *limitFlag > 0 {
+		options.Limit = *limitFlag
 	}
 	if err := gm.Log(options, os.Stdout); err != nil {
 		if err == shadowfs.ErrNoCommits {

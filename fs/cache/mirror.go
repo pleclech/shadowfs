@@ -7,8 +7,6 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/hanwen/go-fuse/v2/fs"
-
 	"github.com/pleclech/shadowfs/fs/pathutil"
 	"github.com/pleclech/shadowfs/fs/utils"
 )
@@ -140,7 +138,7 @@ func CreateMirroredFileOrDir(srcPath, cachePath, srcDir string) (string, error) 
 		}
 
 		// create empty file using syscall.Open (handles existing files gracefully)
-		fd, err := syscall.Open(cachePathResult, syscall.O_CREAT|syscall.O_WRONLY|syscall.O_TRUNC, st.Mode)
+		fd, err := syscall.Open(cachePathResult, syscall.O_CREAT|syscall.O_WRONLY|syscall.O_TRUNC, uint32(st.Mode))
 		if err != nil {
 			return cachePathResult, err
 		}
@@ -151,11 +149,8 @@ func CreateMirroredFileOrDir(srcPath, cachePath, srcDir string) (string, error) 
 			return cachePathResult, err
 		}
 
-		// Copy timestamps
-		var times [2]syscall.Timespec
-		times[0] = syscall.Timespec{Sec: st.Atim.Sec, Nsec: st.Atim.Nsec}
-		times[1] = syscall.Timespec{Sec: st.Mtim.Sec, Nsec: st.Mtim.Nsec}
-		if err := syscall.UtimesNano(cachePathResult, times[:]); err != nil {
+		// Copy timestamps (platform-specific implementation)
+		if err := copyTimestamps(cachePathResult, &st); err != nil {
 			return cachePathResult, err
 		}
 
@@ -165,72 +160,7 @@ func CreateMirroredFileOrDir(srcPath, cachePath, srcDir string) (string, error) 
 	return cachePathResult, syscall.ENOTSUP
 }
 
-// CopyFileSimple copies a file from source to destination (fallback when helpers not available)
-// Note: Parent directory must exist - caller is responsible for ensuring it
-func CopyFileSimple(srcPath, destPath string, mode uint32) syscall.Errno {
-	// Ensure parent directory exists (defensive check)
-	destDir := filepath.Dir(destPath)
-	if err := os.MkdirAll(destDir, 0755); err != nil {
-		return fs.ToErrno(err)
-	}
-
-	srcFd, err := syscall.Open(srcPath, syscall.O_RDONLY, 0)
-	if err != nil {
-		return fs.ToErrno(err)
-	}
-	defer syscall.Close(srcFd)
-
-	destFd, err := syscall.Open(destPath, syscall.O_CREAT|syscall.O_WRONLY|syscall.O_TRUNC, mode)
-	if err != nil {
-		return fs.ToErrno(err)
-	}
-	defer syscall.Close(destFd)
-
-	// Get file size
-	var stat syscall.Stat_t
-	err = syscall.Fstat(srcFd, &stat)
-	if err != nil {
-		return fs.ToErrno(err)
-	}
-
-	// Copy file content using buffer pool
-	bufPtr, ok := bufferPool.Get().(*[]byte)
-	if !ok {
-		return syscall.ENOMEM
-	}
-	defer bufferPool.Put(bufPtr)
-	buf := *bufPtr
-
-	for {
-		n, err := syscall.Read(srcFd, buf)
-		if err != nil && err != syscall.EINTR && err != syscall.EAGAIN {
-			return fs.ToErrno(err)
-		}
-		if n == 0 {
-			break
-		}
-
-		offset := 0
-		for offset < n {
-			written, err := syscall.Write(destFd, buf[offset:n])
-			if err != nil {
-				return fs.ToErrno(err)
-			}
-			offset += written
-		}
-	}
-
-	// Copy metadata
-	if err := syscall.Chown(destPath, int(stat.Uid), int(stat.Gid)); err != nil {
-		return fs.ToErrno(err)
-	}
-
-	var times [2]syscall.Timespec
-	times[0] = syscall.Timespec{Sec: stat.Atim.Sec, Nsec: stat.Atim.Nsec}
-	times[1] = syscall.Timespec{Sec: stat.Mtim.Sec, Nsec: stat.Mtim.Nsec}
-	if err := syscall.UtimesNano(destPath, times[:]); err != nil {
-		return fs.ToErrno(err)
-	}
-
-	return 0
-}
+// CopyFileSimple is implemented in platform-specific files:
+// - mirror_linux.go: Linux version
+// - mirror_darwin.go: Darwin version
+// - mirror_other.go: Other platforms version
