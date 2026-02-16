@@ -61,12 +61,15 @@ type Logger struct {
 
 var (
 	// Global logger instance
-	globalLogger *Logger
-	loggerOnce   sync.Once
+	globalLogger    *Logger
+	loggerOnce      sync.Once
+	loggerInitMutex sync.Mutex
 )
 
 // InitLogger initializes the global logger
 func InitLogger(level LogLevel) {
+	loggerInitMutex.Lock()
+	defer loggerInitMutex.Unlock()
 	loggerOnce.Do(func() {
 		globalLogger = NewLogger(level, os.Stderr)
 	})
