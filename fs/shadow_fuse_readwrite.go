@@ -62,37 +62,13 @@ func (n *ShadowNode) CopyFileRange(ctx context.Context, fhIn fs.FileHandle, offI
 func (n *ShadowNode) Write(ctx context.Context, f fs.FileHandle, data []byte, off int64) (uint32, syscall.Errno) {
 	p := n.FullPath(true)
 
-	// CRITICAL: Stop the timer at the start of Write() to prevent it from firing during write
-	// Get activity tracker from root node (same logic as HandleWriteActivity)
-	activityTracker := n.activityTracker
-	if activityTracker == nil {
-		// Try to get root node to find activity tracker
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					// Root() panicked - can't traverse up, skip stopping timer
-				}
-			}()
-			root := n.Root()
-			if root != nil {
-				if rootOps := root.Operations(); rootOps != nil {
-					if rootNode, ok := rootOps.(*ShadowNode); ok && rootNode.activityTracker != nil {
-						activityTracker = rootNode.activityTracker
-					}
-				}
-			}
-		}()
-	}
-
-	// Stop timer if activity tracker is available
-	if activityTracker != nil {
-		// Convert cache path to mount point path for timer operations
-		mountPointPath := p
-		if strings.HasPrefix(p, n.cachePath) {
-			mountPointPath = n.RebasePathUsingMountPoint(p)
-		}
-		activityTracker.StopTimer(mountPointPath)
-		Debug("Write: Stopped timer for %s", mountPointPath)
+	// CRITICAL: Handle write start with proper ordering
+	// 1. Pause auto-commit to prevent commits during write
+	// 2. Remove file from pending (no longer idle)
+	if n.gitManager != nil && n.gitManager.IsEnabled() {
+		n.gitManager.PauseAutoCommit()
+		n.gitManager.RemoveFromPending(p)
+		Debug("Write: Paused auto-commit and removed %s from pending", p)
 	}
 
 	// Resolve to cache path if needed (same logic as Open())
@@ -300,10 +276,15 @@ func (n *ShadowNode) Write(ctx context.Context, f fs.FileHandle, data []byte, of
 
 		n.Flush(ctx, f, nil)
 
-		// CRITICAL: Restart the timer from zero after successful write
-		// This ensures the idle timer only fires when the file is truly idle (no writes happening)
-		n.HandleWriteActivity(p)
-		Debug("Write: Restarted timer from zero for %s", p)
+		// CRITICAL: Handle write completion with proper ordering
+		// GUARANTEED cleanup regardless of error path
+		defer func() {
+			if n.gitManager != nil && n.gitManager.IsEnabled() {
+				n.gitManager.ResumeAutoCommit()
+				n.HandleWriteActivity(p)
+				Debug("Write: Resumed auto-commit and rescheduled %s", p)
+			}
+		}()
 	}
 	return written, errno
 }

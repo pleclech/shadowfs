@@ -579,10 +579,11 @@ The filesystem includes optional automatic Git versioning to track all file chan
 1. **Idle-Based Commits**: Files are automatically committed after a configurable idle period (default: 30 seconds)
 2. **Batch Commits**: Multiple files edited together are committed in a single commit
 3. **Change Detection**: Only files with actual changes are committed
-4. **Async Operations**: Git operations run in background, not blocking filesystem operations
-5. **Commit-on-Unmount**: All pending changes are committed before unmounting to prevent data loss
-6. **Concise Commit Messages**: Commit messages show file count (e.g., "Auto-commit: 3 files") for scalability
-7. **File Visibility**: The `version list` command shows changed files by default using `--name-only`
+4. **Original State Capture**: When a file is first modified, its original unmodified state from the source directory is automatically committed first, creating a complete history: original state → first modification → subsequent modifications
+5. **Async Operations**: Git operations run in background, not blocking filesystem operations
+6. **Commit-on-Unmount**: All pending changes are committed before unmounting to prevent data loss
+7. **Concise Commit Messages**: Commit messages show file count (e.g., "Auto-commit: 3 files") for scalability
+8. **File Visibility**: The `version list` command shows changed files by default using `--name-only`
 
 ### Commit Message Format
 
@@ -594,6 +595,8 @@ File names are shown separately in the `version list` output, not in the commit 
 
 ### Architecture
 
+The Git auto-versioning system uses a unified queue architecture to prevent FUSE deadlocks and ensure operation ordering:
+
 ```
 File Write Operation
     ↓
@@ -603,10 +606,19 @@ Activity Tracker (starts/resets timer)
     ↓
 [User stops editing... timer expires after idle timeout]
     ↓
-Git Manager (async commit queue)
+Git Manager (unified operation queue)
     ↓
-git add + git commit (background goroutine)
+Ordered Processing (single goroutine)
+    ↓
+git add + git commit (non-blocking)
 ```
+
+**Key Features:**
+- **Unified Queue**: All Git operations go through a single queue to maintain order
+- **Non-Blocking**: Critical operations (rename/delete) return immediately without blocking FUSE
+- **Pause/Resume**: Operations can be paused during critical sections and resumed safely
+- **Error Isolation**: Failed operations don't block subsequent operations
+- **Concurrent Safe**: Multiple operations can be queued simultaneously while maintaining order
 
 ### Configuration
 
@@ -648,11 +660,32 @@ sudo umount /mnt/overlay
 
 ### Benefits
 
-- **Full History**: Every change is tracked with Git commits
-- **Time Travel**: Revert to any previous version using `git checkout`
+- **Full History**: Every change is tracked with Git commits, including the original unmodified state
+- **Time Travel**: Revert to any previous version using `version restore`, including the original unmodified state
+- **Original State Preservation**: The original state of files is automatically captured before first modification
 - **No Data Loss**: Commit-on-unmount ensures changes are saved
 - **Efficient**: Batch commits and change detection reduce commit noise
 - **Non-Intrusive**: Git operations don't slow down filesystem performance
+
+### Restoring to Original State
+
+When a file is first modified, its original state is automatically committed with the message "Initial state: <filename>". You can restore files to their original unmodified state:
+
+```bash
+# List commit history to find the initial state commit
+shadowfs version list --mount-point /mnt/overlay --path file.txt
+
+# Restore file to its original state (find the commit hash from the list above)
+shadowfs version restore --mount-point /mnt/overlay --file file.txt <initial-commit-hash>
+
+# Or restore entire workspace to original state
+shadowfs version restore --mount-point /mnt/overlay <initial-commit-hash>
+```
+
+The commit history will show:
+- `Initial state: file.txt` - Original unmodified state from source
+- `Auto-commit: 1 file` - First modification
+- `Auto-commit: 1 file` - Subsequent modifications
 
 ## Sync to Source
 

@@ -156,10 +156,10 @@ func ResolveRenamedPath(mappings []RenameMapping, originalPath string) string {
 // FindRenameMapping finds the most recent rename mapping for a given path
 func FindRenameMapping(mappings []RenameMapping, path string) *RenameMapping {
 	var latest *RenameMapping
-	for _, mapping := range mappings {
-		if strings.HasPrefix(path, mapping.OriginalPath) {
-			if latest == nil || mapping.Timestamp > latest.Timestamp {
-				latest = &mapping
+	for i := range mappings {
+		if strings.HasPrefix(path, mappings[i].OriginalPath) {
+			if latest == nil || mappings[i].Timestamp > latest.Timestamp {
+				latest = &mappings[i]
 			}
 		}
 	}

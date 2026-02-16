@@ -11,6 +11,8 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 
+	"github.com/pleclech/shadowfs/fs/cache"
+	"github.com/pleclech/shadowfs/fs/operations"
 	"github.com/pleclech/shadowfs/fs/xattr"
 )
 
@@ -276,5 +278,73 @@ func BenchmarkConcurrentOperations(b *testing.B) {
 				i++
 			}
 		})
+	})
+}
+
+// BenchmarkPathResolver benchmarks the PathResolver which handles rename tracking
+func BenchmarkPathResolver(b *testing.B) {
+	tempDir := b.TempDir()
+	srcDir := filepath.Join(tempDir, "src")
+	cacheDir := filepath.Join(tempDir, "cache")
+	mountDir := filepath.Join(tempDir, "mount")
+
+	os.MkdirAll(srcDir, 0755)
+	os.MkdirAll(cacheDir, 0755)
+
+	cacheMgr := cache.NewManager(cacheDir, srcDir)
+	xattrMgr := xattr.NewManager()
+	renameTracker := operations.NewRenameTracker()
+	resolver := NewPathResolver(srcDir, cacheDir, mountDir, renameTracker, cacheMgr, xattrMgr)
+
+	// Test various path scenarios
+	paths := []string{
+		filepath.Join(mountDir, "simple.txt"),
+		filepath.Join(mountDir, "dir", "nested.txt"),
+		filepath.Join(mountDir, "a", "b", "c", "deep.txt"),
+	}
+
+	b.Run("ResolvePaths", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_, _, _, _ = resolver.ResolvePaths(paths[i%len(paths)])
+		}
+	})
+
+	b.Run("ResolveForRead", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_, _, _, _ = resolver.ResolveForRead(paths[i%len(paths)])
+		}
+	})
+}
+
+// BenchmarkRenameTracker benchmarks the rename tracker operations
+func BenchmarkRenameTracker(b *testing.B) {
+	tracker := operations.NewRenameTracker()
+
+	// Pre-populate with mappings
+	for i := 0; i < 100; i++ {
+		key := fmt.Sprintf("dir%d/subdir%d/file%d.txt", i%10, i%5, i)
+		value := fmt.Sprintf("renamed%d/file%d.txt", i%10, i)
+		tracker.StoreRenameMapping(key, value, false)
+	}
+
+	paths := make([]string, 100)
+	for i := 0; i < 100; i++ {
+		paths[i] = fmt.Sprintf("dir%d/subdir%d/file%d.txt", i%10, i%5, i)
+	}
+
+	b.Run("ResolveRenamedPath", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_, _, _ = tracker.ResolveRenamedPath(paths[i%len(paths)])
+		}
+	})
+
+	b.Run("StoreRenameMapping", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			tracker.StoreRenameMapping(fmt.Sprintf("new%d/path.txt", i), fmt.Sprintf("old%d/path.txt", i), false)
+		}
 	})
 }

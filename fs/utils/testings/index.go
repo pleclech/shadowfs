@@ -82,6 +82,7 @@ func ShouldRenameFile(oldPath string, newPath string, t *testing.T, levels ...in
 	if err := os.Rename(oldPath, newPath); err != nil {
 		FailFIndent(t, level, "failed to rename file: %v", err)
 	}
+
 	ShouldNotExist(oldPath, t, level+1)
 	ShouldExist(newPath, t, level+1)
 	ShouldBeRegularFile(newPath, t, level+1)
@@ -310,7 +311,7 @@ func DirShouldHaveEntries(dir string, expectedEntries []string, t *testing.T, le
 	SuccessFIndent(t, level, "")
 }
 
-func DirShouldContainsEntries(dir string, expectedEntries []string, t *testing.T, levels ...int) {
+func DirShouldContainEntries(dir string, expectedEntries []string, t *testing.T, levels ...int) {
 	t.Helper()
 	level := getLevel(levels...)
 	InfoFIndent(t, level, "directory %s should contain entries %v", dir, expectedEntries)
@@ -1459,6 +1460,44 @@ func RestorePath(t *testing.T, binaryPath, mountPoint, relPath, commitHash strin
 	t.Logf("RestoreFile: Restore command completed successfully")
 }
 
+// RestorePathWithForce restores a path to a specific commit using shadowfs CLI with --force flag
+// Uses a timeout to prevent hangs
+func RestorePathWithForce(t *testing.T, binaryPath, mountPoint, relPath, commitHash string) {
+	t.Helper()
+	t.Logf("RestoreFile: Starting restore command: %s version restore --force --mount-point %s --path %s %s", binaryPath, mountPoint, relPath, commitHash)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, binaryPath, "version", "restore", "--force", "--mount-point", mountPoint, "--path", relPath, commitHash)
+	// Inherit environment variables (including SHADOWFS_LOG_LEVEL for debug mode)
+	cmd.Env = os.Environ()
+
+	// Capture both stdout and stderr separately for better debugging
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	t.Logf("RestoreFile: Executing restore command...")
+	err := cmd.Run()
+
+	// Always log output for debugging
+	if stdout.Len() > 0 {
+		t.Logf("RestoreFile stdout: %s", stdout.String())
+	}
+	if stderr.Len() > 0 {
+		t.Logf("RestoreFile stderr: %s", stderr.String())
+	}
+
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			Failf(t, "Restore command timed out after 30s: %v, stdout: %s, stderr: %s", err, stdout.String(), stderr.String())
+		}
+		Failf(t, "Restore command failed: %v, stdout: %s, stderr: %s", err, stdout.String(), stderr.String())
+	}
+	t.Logf("RestoreFile: Restore command completed successfully")
+}
+
 // RestoreDirectory restores a directory to a specific commit using shadowfs CLI
 // Uses a timeout to prevent hangs
 func RestoreDirectory(t *testing.T, binaryPath, mountPoint, relPath, commitHash string) {
@@ -1478,7 +1517,7 @@ func RestoreDirectory(t *testing.T, binaryPath, mountPoint, relPath, commitHash 
 	}
 }
 
-func ListVersion(t *testing.T, binaryPath, mountPoint string) string {
+func ListVersions(t *testing.T, binaryPath, mountPoint string) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1611,11 +1650,16 @@ func (fs *TestFilesystem) RestorePathFS(relPath, commitHash string) {
 	RestorePath(fs.t, fs.binaryPath, fs.mountPoint, relPath, commitHash)
 }
 
+// RestorePathFSWithForce restores a path to a specific commit with --force flag
+func (fs *TestFilesystem) RestorePathFSWithForce(relPath, commitHash string) {
+	RestorePathWithForce(fs.t, fs.binaryPath, fs.mountPoint, relPath, commitHash)
+}
+
 // RestoreWorkspaceFS restores entire workspace to a specific commit
 func (fs *TestFilesystem) RestoreWorkspaceFS(commitHash string) {
 	RestoreWorkspace(fs.t, fs.binaryPath, fs.mountPoint, commitHash)
 }
 
-func (fs *TestFilesystem) ListVersionFS() string {
-	return ListVersion(fs.t, fs.binaryPath, fs.mountPoint)
+func (fs *TestFilesystem) ListVersionsFS() string {
+	return ListVersions(fs.t, fs.binaryPath, fs.mountPoint)
 }

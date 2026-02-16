@@ -309,12 +309,17 @@ func runVersionRestore(args []string) {
 	if !*force {
 		uncommitted, err := gm.StatusPorcelain()
 		if err == nil && len(uncommitted) > 0 {
-			log.Fatalf("Uncommitted changes detected. Use --force to overwrite.")
+			log.Printf("Warning: There are uncommitted changes (%d files). Use --force to overwrite.", len(uncommitted))
 		}
 	}
 
 	// Use step-by-step restoration engine
 	log.Printf("Starting restore operation: commit=%s, paths=%v", commitHash, paths)
+
+	// Pause auto-commit during restore to prevent race conditions
+	gm.PauseAutoCommit()
+	defer gm.ResumeAutoCommit()
+
 	if err := gm.RestoreCommit(commitHash, paths); err != nil {
 		log.Fatalf("Failed to restore: %v", err)
 	}

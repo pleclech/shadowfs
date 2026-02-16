@@ -16,6 +16,7 @@ import (
 
 	shadowfs "github.com/pleclech/shadowfs/fs"
 	"github.com/pleclech/shadowfs/fs/cache"
+	tu "github.com/pleclech/shadowfs/fs/utils/testings"
 )
 
 func TestDaemonCommands(t *testing.T) {

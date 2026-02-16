@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **IPC mechanism for FUSE cache invalidation:**
+  - Unix socket IPC server for communication between CLI restore operations and FUSE filesystem process
+  - Automatic dirty file tracking: files restored via CLI are marked dirty, triggering `DIRECT_IO` for subsequent reads
+  - Abstract Unix socket support for long paths (>100 chars) to avoid Unix socket path length limits (~108 chars on Linux)
+  - Works in both daemon and non-daemon mode
+  - Graceful degradation: restore operations continue even if IPC unavailable (FUSE process not running)
+
+### Fixed
+- **Git auto-versioning race conditions:**
+  - Fixed hanging issue during rename operations when Git auto-versioning is enabled
+  - Implemented pause/resume mechanism for auto-commit system during critical Git operations
+  - Prevents conflicts between auto-commit timers and manual Git operations (rename commits, restore operations)
+  - Maintains natural expiration order (FIFO) for pending commits during pause periods
+  - Applied pause/resume to rename, deletion, and restore operations
+- **FUSE cache invalidation after restore:**
+  - CLI restore operations (`shadowfs version restore`) now properly invalidate FUSE kernel cache
+  - Restored files are immediately visible with correct content through mount point
+  - Eliminates stale cache issue where restored files showed old content until next read/write
+- **Mkdir idempotent behavior:**
+  - `Mkdir` now correctly handles idempotent operations (succeeds if directory already exists)
+  - Fixed type replacement scenario: creating a directory after deleting a file with same name now works correctly
+  - Test helper `ShouldCreateDir` now checks if directory exists before attempting creation (idempotent)
+- **FUSE operation deadlocks:**
+  - Fixed hang in `Flush()` by making `NotifyContent` non-blocking (called in goroutine)
+  - Prevents deadlocks when cache invalidation notifications are sent from within FUSE operation handlers
+
+### Changed
+- `version restore` command: Refactored to support multiple `--path` flags instead of separate `--file`, `--dir`, `--workspace` flags
+  - Usage: `shadowfs version restore --path file1.txt --path dir1/ --path dir2/file.txt <commit>`
+  - If no `--path` is specified, restores entire workspace
+- `restoreFileFromCommit`: Now preserves file permissions (mode) from Git commit and marks files as dirty via IPC for cache invalidation
+
 ## [1.1.0] - "Stability & Compatibility" - 2025-11-14
 
 ### Added

@@ -3,11 +3,11 @@ package fs
 import (
 	"os"
 	"path/filepath"
-	"sync"
 	"syscall"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 
+	"github.com/pleclech/shadowfs/fs/cache"
 	"github.com/pleclech/shadowfs/fs/utils"
 	"github.com/pleclech/shadowfs/fs/xattr"
 )
@@ -16,14 +16,6 @@ import (
 type ShadowNodeHelpers struct {
 	node        *ShadowNode
 	pathManager *PathManager
-}
-
-// bufferPool provides reusable 64KB buffers to reduce allocations
-var bufferPool = sync.Pool{
-	New: func() interface{} {
-		buf := make([]byte, 64*1024) // 64KB buffer
-		return &buf
-	},
 }
 
 // NewShadowNodeHelpers creates a new ShadowNodeHelpers instance
@@ -164,9 +156,8 @@ func (h *ShadowNodeHelpers) CreateMirroredFileOrDir(srcPath string) (string, sys
 
 // copyFileFallback is the traditional read/write copy method
 func (h *ShadowNodeHelpers) copyFileFallback(srcFd, destFd int) syscall.Errno {
-	// Get buffer from pool to reduce allocations
-	bufPtr := bufferPool.Get().(*[]byte)
-	defer bufferPool.Put(bufPtr)
+	bufPtr := cache.GetBufferPool().Get().(*[]byte)
+	defer cache.GetBufferPool().Put(bufPtr)
 	buf := *bufPtr
 
 	for {

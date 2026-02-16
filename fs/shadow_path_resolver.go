@@ -46,31 +46,9 @@ func (pr *PathResolver) ResolvePaths(mountPointPath string) (cachePath, sourcePa
 	mountPointRelative = strings.Trim(mountPointRelative, "/")
 
 	if mountPointRelative == "" {
-		// Root path
 		return pr.cachePath, pr.srcDir, false, 0
 	}
 
-	// Step 1: Check memory tracker first (fast path)
-	var resolvedRelative string
-	var found bool
-	if pr.renameTracker != nil {
-		resolvedRelative, isIndependent, found = pr.renameTracker.ResolveRenamedPath(mountPointRelative)
-		if found {
-			if isIndependent {
-				// Path is independent - use mount point path, don't check source
-				sourcePath = filepath.Join(pr.srcDir, mountPointRelative)
-				cachePath = pr.cacheMgr.ResolveCachePath(sourcePath)
-				return cachePath, sourcePath, true, 0
-			}
-			// Found in memory - use resolved path
-			sourcePath = filepath.Join(pr.srcDir, resolvedRelative)
-			// Convert mount point relative path to cache path
-			cachePath = filepath.Join(pr.cachePath, mountPointRelative)
-			return cachePath, sourcePath, false, 0
-		}
-	}
-
-	// Step 2: Fallback to xattr-based resolution (slow path, but populates memory)
 	if pr.xattrMgr == nil {
 		// No xattr manager - return path as-is
 		sourcePath = filepath.Join(pr.srcDir, mountPointRelative)
@@ -78,7 +56,20 @@ func (pr *PathResolver) ResolvePaths(mountPointPath string) (cachePath, sourcePa
 		return cachePath, sourcePath, false, 0
 	}
 
-	// Walk up the path, checking each parent directory's xattr
+	if pr.renameTracker != nil {
+		resolved, independent, found := pr.renameTracker.ResolveRenamedPath(mountPointRelative)
+		if found {
+			if independent {
+				sourcePath = filepath.Join(pr.srcDir, mountPointRelative)
+				cachePath = filepath.Join(pr.cachePath, mountPointRelative)
+				return cachePath, sourcePath, true, 0
+			}
+			sourcePath = filepath.Join(pr.srcDir, resolved)
+			cachePath = filepath.Join(pr.cachePath, mountPointRelative)
+			return cachePath, sourcePath, false, 0
+		}
+	}
+
 	parts := strings.Split(mountPointRelative, "/")
 	if len(parts) == 0 {
 		sourcePath = pr.srcDir
@@ -108,14 +99,11 @@ func (pr *PathResolver) ResolvePaths(mountPointPath string) (cachePath, sourcePa
 				return "", "", false, errno
 			}
 			if exists && attr != nil {
-				// Check if this parent is independent
 				if attr.CacheIndependent {
-					// Parent is independent - stop resolution, don't check source
-					isIndependent = true
 					// Populate memory tracker with independent flag
 					if pr.renameTracker != nil {
 						currentPathNormalized := strings.Trim(currentPath, "/")
-						// Store as independent in memory (even if not renamed)
+						// Store as independent in memory
 						pr.renameTracker.StoreRenameMapping(currentPathNormalized, currentPathNormalized, true)
 					}
 					// Return current mount point path (no resolution needed)

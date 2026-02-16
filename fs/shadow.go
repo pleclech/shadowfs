@@ -40,8 +40,7 @@ type ShadowNode struct {
 	helpers *ShadowNodeHelpers
 
 	// Git functionality (optional)
-	gitManager      *GitManager
-	activityTracker *ActivityTracker
+	gitManager *GitManager
 
 	// Clean operation handlers
 	cacheMgr        *cache.Manager
@@ -157,6 +156,147 @@ func (n *ShadowNode) MarkDirty(filePath string) {
 	n.markDirty(filePath)
 }
 
+// Refresh invalidates the FUSE cache for a path so it gets re-read from cache
+// This is called by IPC server after CLI restore operations modify the cache
+func (n *ShadowNode) Refresh(mountPointPath string) {
+	Debug("Refresh: Marking file as dirty for path: %s", mountPointPath)
+
+	// Mark as dirty to force re-read from cache on next access
+	n.markDirty(mountPointPath)
+	Debug("Refresh: Marked %s as dirty", mountPointPath)
+}
+
+// RestoreFile handles file restoration - marks as dirty AND invalidates directory entry
+func (n *ShadowNode) RestoreFile(mountPointPath string) {
+	n.markDirty(mountPointPath)
+
+	// Convert mount point path to path relative to mount point root
+	mountRoot := n.mountPoint
+	relPath := mountPointPath
+	if strings.HasPrefix(mountPointPath, mountRoot) {
+		relPath = strings.TrimPrefix(mountPointPath, mountRoot)
+		relPath = strings.TrimPrefix(relPath, "/")
+	}
+
+	parentRelPath := filepath.Dir(relPath)
+	filename := filepath.Base(mountPointPath)
+
+	// Clear independent flag from rename tracker when restoring a file
+	// When a file is deleted, it's marked as "independent" in the rename tracker.
+	// We need to clear this flag so Lookup doesn't treat the file as deleted.
+	if n.pathResolver != nil && n.pathResolver.renameTracker != nil {
+		n.pathResolver.renameTracker.RemoveRenameMapping(relPath)
+	}
+
+	// Also clear the deletion marker xattr if present
+	// When a file is deleted, it has a deletion marker xattr
+	// We need to remove this so Lookup doesn't treat the file as deleted
+	// Use pathutil directly to convert mount point path to cache path
+	cachePath := pathutil.RebaseToCache(mountPointPath, n.cachePath, n.mountPoint)
+	if n.xattrMgr != nil {
+		var attr xattr.XAttr
+		exists, errno := xattr.Get(cachePath, &attr)
+		if errno != 0 && errno != syscall.ENODATA {
+		} else if exists {
+			n.xattrMgr.Clear(cachePath)
+		}
+	}
+
+	// Helper function to invalidate both regular and negative entries
+	invalidateEntries := func(node *ShadowNode, name string) {
+		node.InvalidateEntry(context.Background(), name)
+		node.InvalidateNegativeEntry(context.Background(), name)
+	}
+
+	// Handle case where parentRelPath is "." (file at root of mount point)
+	// or parentRelPath is empty (also file at root)
+	if parentRelPath == "." || parentRelPath == "" {
+		// File is at root of mount point - invalidate on root node
+		// Call invalidate multiple times to ensure kernel cache is refreshed
+		// This is a workaround for kernel negative dentry caching issues
+		for i := 0; i < 3; i++ {
+			invalidateEntries(n, filename)
+		}
+	} else if filename != "" && filename != "." {
+		if parentRelPath == "/" {
+			for i := 0; i < 3; i++ {
+				invalidateEntries(n, filename)
+			}
+		} else {
+			parentNode := n.walkToPath(parentRelPath)
+			if parentNode != nil {
+				for i := 0; i < 3; i++ {
+					invalidateEntries(parentNode, filename)
+				}
+			} else {
+				for i := 0; i < 3; i++ {
+					invalidateEntries(n, filename)
+				}
+			}
+		}
+	}
+}
+
+// walkToPath walks from root to the given path and returns the node
+func (n *ShadowNode) walkToPath(targetPath string) *ShadowNode {
+	if targetPath == "" || targetPath == "." {
+		return n
+	}
+
+	relPath := targetPath
+	rootPath := n.RootData.Path
+
+	if strings.HasPrefix(targetPath, rootPath) {
+		relPath = strings.TrimPrefix(targetPath, rootPath)
+		relPath = strings.TrimPrefix(relPath, "/")
+	}
+
+	if relPath == "" {
+		return n
+	}
+
+	current := n
+	parts := strings.Split(relPath, "/")
+
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+
+		child := current.getChild(part)
+		if child == nil {
+			return nil
+		}
+
+		shadowNode, ok := child.(*ShadowNode)
+		if !ok {
+			return nil
+		}
+
+		current = shadowNode
+	}
+
+	return current
+}
+
+// getChild gets a child node by name from the inode
+func (n *ShadowNode) getChild(name string) interface{} {
+	inode := n.EmbeddedInode()
+	if inode == nil {
+		return nil
+	}
+
+	// Get the child inode
+	childInode := inode.GetChild(name)
+	if childInode == nil {
+		return nil
+	}
+
+	// Get the operations
+	ops := childInode.Operations()
+	return ops
+}
+
 // markDirty marks a file as dirty and sets ref count to 1 (the write handle)
 // filePath should be a mount point path (not cache path) because what's dirty is what's visible at the mount point
 // If file is already dirty, increments ref count instead of resetting
@@ -179,20 +319,6 @@ func (n *ShadowNode) markDirty(filePath string) {
 		n.dirtyFiles[filePath] = 1
 		n.dirtyFilesWriteClosed[filePath] = false // Write handle is open
 		Debug("markDirty: Marked %s as dirty (ref count: 1)", filePath)
-	}
-}
-
-// incrementDirtyRef increments reference count when a new handle opens a dirty file
-// filePath should be a mount point path (not cache path)
-func (n *ShadowNode) incrementDirtyRef(filePath string) {
-	n.dirtyFilesMutex.Lock()
-	defer n.dirtyFilesMutex.Unlock()
-	if n.dirtyFiles == nil {
-		return
-	}
-	if count, exists := n.dirtyFiles[filePath]; exists {
-		n.dirtyFiles[filePath] = count + 1
-		Debug("incrementDirtyRef: Incremented ref count for %s to %d", filePath, count+1)
 	}
 }
 
@@ -251,18 +377,6 @@ func (n *ShadowNode) decrementDirtyRef(filePath string) bool {
 	return false
 }
 
-// isDirty checks if a file is dirty (has non-zero ref count)
-// filePath should be a mount point path (not cache path)
-func (n *ShadowNode) isDirty(filePath string) bool {
-	n.dirtyFilesMutex.RLock()
-	defer n.dirtyFilesMutex.RUnlock()
-	if n.dirtyFiles == nil {
-		return false
-	}
-	_, exists := n.dirtyFiles[filePath]
-	return exists
-}
-
 // checkDirtyAndIncrementRef atomically checks if file is dirty and increments ref count
 // filePath should be a mount point path (not cache path)
 // Returns true if file was dirty and ref count was incremented
@@ -292,32 +406,70 @@ func (n *ShadowNode) checkDirtyAndIncrementRef(filePath string) bool {
 func (n *ShadowNode) InvalidateEntry(ctx context.Context, name string) {
 	server := n.getServer()
 	if server == nil {
-		// Server not set yet - this is OK, just skip
 		return
 	}
+	var parentIno uint64
 	parentInode := n.EmbeddedInode()
-	if parentInode == nil {
-		return
+	if parentInode != nil {
+		parentIno = parentInode.StableAttr().Ino
 	}
-	// Get parent inode number (uint64) from StableAttr
-	parentIno := parentInode.StableAttr().Ino
-	server.EntryNotify(parentIno, name)
+	if parentIno == 0 {
+		root := n.Root()
+		if root != nil {
+			rootInode := root.EmbeddedInode()
+			if rootInode != nil {
+				parentIno = rootInode.StableAttr().Ino
+			}
+		}
+	}
+	if parentIno == 0 {
+		parentIno = 1
+	}
+	if parentIno != 0 {
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					Debug("InvalidateEntry: EntryNotify panicked (ignored): %v", r)
+				}
+			}()
+			server.EntryNotify(parentIno, name)
+		}()
+	}
 }
 
 // InvalidateNegativeEntry safely invalidates a negative dentry (useful after rm)
 func (n *ShadowNode) InvalidateNegativeEntry(ctx context.Context, name string) {
 	server := n.getServer()
 	if server == nil {
-		// Server not set yet - this is OK, just skip
 		return
 	}
+	var parentIno uint64
 	parentInode := n.EmbeddedInode()
-	if parentInode == nil {
-		return
+	if parentInode != nil {
+		parentIno = parentInode.StableAttr().Ino
 	}
-	// Get parent inode number (uint64) from StableAttr
-	parentIno := parentInode.StableAttr().Ino
-	server.EntryNotify(parentIno, name)
+	if parentIno == 0 {
+		root := n.Root()
+		if root != nil {
+			rootInode := root.EmbeddedInode()
+			if rootInode != nil {
+				parentIno = rootInode.StableAttr().Ino
+			}
+		}
+	}
+	if parentIno == 0 {
+		parentIno = 1
+	}
+	if parentIno != 0 {
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					Debug("InvalidateNegativeEntry: EntryNotify panicked (ignored): %v", r)
+				}
+			}()
+			server.EntryNotify(parentIno, name)
+		}()
+	}
 }
 
 // InitGitManager initializes Git functionality for auto-versioning
@@ -332,9 +484,6 @@ func (n *ShadowNode) InitGitManager(config GitConfig) error {
 	if err := n.gitManager.InitializeRepo(); err != nil {
 		return err
 	}
-
-	// Create activity tracker
-	n.activityTracker = NewActivityTracker(n, config)
 
 	return nil
 }
@@ -358,35 +507,18 @@ func (n *ShadowNode) HandleWriteActivity(filePath string) {
 		Debug("HandleWriteActivity: Using path as-is (not cache path): %s", filePath)
 	}
 
-	// Find activity tracker by traversing up to root if current node doesn't have it
-	// This handles cases where nodes are created before InitGitManager is called
-	activityTracker := n.activityTracker
-	if activityTracker == nil {
-		// Try to get root node to find activity tracker
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					// Root() panicked - can't traverse up, skip tracking
-					Debug("HandleWriteActivity: Cannot access root node, skipping tracking for %s", mountPointPath)
-				}
-			}()
-			root := n.Root()
-			if root != nil {
-				if rootOps := root.Operations(); rootOps != nil {
-					if rootNode, ok := rootOps.(*ShadowNode); ok && rootNode.activityTracker != nil {
-						activityTracker = rootNode.activityTracker
-						Debug("HandleWriteActivity: Found activity tracker in root node")
-					}
-				}
-			}
-		}()
+	// Skip auto-commit for shadowfs metadata files (they are handled by dedicated operations)
+	if strings.Contains(mountPointPath, ".shadowfs-metadata/") {
+		Debug("HandleWriteActivity: Skipping auto-commit for metadata file %s", mountPointPath)
+		return
 	}
 
-	if activityTracker != nil {
+	// Track file activity using GitManager directly
+	if n.gitManager != nil && n.gitManager.IsEnabled() {
 		Debug("HandleWriteActivity: Tracking activity for %s", mountPointPath)
-		activityTracker.MarkActivity(mountPointPath)
+		n.gitManager.AutoCommitFile(mountPointPath, "File modification")
 	} else {
-		Debug("HandleWriteActivity: Activity tracker is nil, cannot track %s", mountPointPath)
+		Debug("HandleWriteActivity: Git manager is nil or disabled, cannot track %s", mountPointPath)
 	}
 }
 
@@ -439,18 +571,6 @@ func (n *ShadowNode) CleanupGitManager() {
 	if n.gitManager != nil {
 		// Stop accepting new commits
 		n.gitManager.Stop()
-
-		if n.activityTracker == nil {
-			return
-		}
-
-		// CRITICAL: Commit all pending changes before stopping timers to prevent data loss
-		if err := n.activityTracker.CommitAllPending(); err != nil {
-			Debug("Failed to commit pending changes on cleanup: %v", err)
-		}
-
-		n.activityTracker.StopIdleMonitoring()
-		n.activityTracker = nil
 	}
 }
 
@@ -1272,9 +1392,15 @@ func (n *ShadowNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 							} else {
 								Debug("Open(write): Failed to stat source file %s, using default mode 0644: %v", sourcePath, err)
 							}
+							var cacheStBefore syscall.Stat_t
+							if err := syscall.Lstat(cachePath, &cacheStBefore); err == nil {
+							}
 							if errno := n.helpers.CopyFile(sourcePath, cachePath, mode); errno != 0 {
 								Debug("Open(write): Failed to copy file %s to %s: %v (continuing)", sourcePath, cachePath, errno)
 								return nil, 0, errno
+							}
+							var cacheStAfter syscall.Stat_t
+							if err := syscall.Lstat(cachePath, &cacheStAfter); err == nil {
 							}
 							n.setCacheIndependent(cachePath)
 
@@ -1586,10 +1712,8 @@ func (n *ShadowNode) Rename(ctx context.Context, name string, newParent fs.Inode
 	if n.gitManager != nil && n.gitManager.IsEnabled() {
 		// Convert source paths to relative paths for git commit
 		// sourcePath and destPath are absolute source paths
-		if err := n.gitManager.commitRenameMetadata(sourcePath, destPath); err != nil {
-			log.Printf("Rename: Failed to commit rename metadata: %v", err)
-			// Don't fail the rename operation if metadata commit fails
-		}
+		// Use QueueRenameMetadata to avoid FUSE deadlocks
+		n.gitManager.QueueRenameMetadata(sourcePath, destPath)
 	}
 
 	// Update child node's mirrorPath after successful rename
@@ -2032,9 +2156,8 @@ func newShadowNode(rootData *fs.LoopbackRoot, parent *fs.Inode, _ string, _ *sys
 			n.mountPoint = parentNode.mountPoint
 			n.srcDir = parentNode.srcDir
 			n.mountID = parentNode.mountID
-			// Inherit git manager and activity tracker from parent
+			// Inherit git manager from parent
 			n.gitManager = parentNode.gitManager
-			n.activityTracker = parentNode.activityTracker
 			// Inherit operation handlers from parent
 			n.cacheMgr = parentNode.cacheMgr
 			n.xattrMgr = parentNode.xattrMgr

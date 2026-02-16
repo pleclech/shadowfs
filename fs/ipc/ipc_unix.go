@@ -86,6 +86,9 @@ func removeSocketFile(path string) error {
 	if isAbstractSocket(path) {
 		return nil
 	}
-	return syscall.Unlink(path)
+	err := syscall.Unlink(path)
+	if err != nil && os.IsNotExist(err) {
+		return nil
+	}
+	return err
 }
-

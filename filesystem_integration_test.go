@@ -94,7 +94,7 @@ func TestRestartCache(t *testing.T) {
 	srcDir := t.TempDir()
 
 	// Create a file in source
-	tu.CreateSourceFiles(srcDir, map[string]string{"foo": "file content"}, t)
+	tu.CreateFilesInDirectory(srcDir, map[string]string{"foo": "file content"}, t)
 
 	// Start filesystem
 	cmd, err := runBinary(t, mountPoint, srcDir)
@@ -225,7 +225,7 @@ func TestFilesystem_BasicOperations(t *testing.T) {
 		"file2.txt":       "content2",
 		"dir1/nested.txt": "nested content",
 	}
-	tu.CreateSourceFiles(srcDir, testFiles, t)
+	tu.CreateFilesInDirectory(srcDir, testFiles, t)
 
 	// Start filesystem
 	cmd, err := runBinary(t, mountPoint, srcDir)
@@ -1730,7 +1730,7 @@ func TestSyncCommand_SingleFile(t *testing.T) {
 		"file2.txt": "content2",
 		"file3.txt": "content3",
 	}
-	tu.CreateSourceFiles(srcDir, files, t)
+	tu.CreateFilesInDirectory(srcDir, files, t)
 
 	// Start filesystem
 	cmd, err := runBinary(t, mountPoint, srcDir)
@@ -1798,7 +1798,7 @@ func TestSyncCommand_Directory(t *testing.T) {
 		"dir2/file3.txt": "content3",
 		"file4.txt":      "content4",
 	}
-	tu.CreateSourceFiles(srcDir, dirs, t)
+	tu.CreateFilesInDirectory(srcDir, dirs, t)
 
 	// Start filesystem
 	cmd, err := runBinary(t, mountPoint, srcDir)

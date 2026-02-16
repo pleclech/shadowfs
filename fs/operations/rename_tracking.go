@@ -329,6 +329,29 @@ func (rt *RenameTracker) RemoveRenameMapping(destPath string) {
 	rt.trie.Remove(destPath)
 }
 
+// FindRenamedToPath finds the current destination path for a given source path
+// Given a sourcePath (e.g., "file1.txt"), returns the destPath it was renamed TO (e.g., "renamed.txt")
+// Returns: (destPath, found)
+func (rt *RenameTracker) FindRenamedToPath(sourcePath string) (destPath string, found bool) {
+	// Search through all mappings to find one where SourcePath matches
+	for dest, mapping := range rt.mappings {
+		if mapping.SourcePath == sourcePath {
+			return dest, true
+		}
+	}
+	return "", false
+}
+
+// GetDestinationPaths returns a list of all destination paths currently tracked
+// Used for targeted conflict detection to avoid full directory walks
+func (rt *RenameTracker) GetDestinationPaths() []string {
+	var paths []string
+	for destPath := range rt.mappings {
+		paths = append(paths, destPath)
+	}
+	return paths
+}
+
 // SetIndependent marks a path as independent in the trie
 // This is used when a path becomes independent (e.g., after deletion)
 func (rt *RenameTracker) SetIndependent(destPath string) {

@@ -783,3 +783,267 @@ func TestEdgeCase_NestedIndependentPaths(t *testing.T) {
 		tu.Failf(t, "Source file should still exist")
 	}
 }
+
+// TestEdgeCase_RenameToNestedPath verifies renaming file to nested directory that exists in cache
+func TestEdgeCase_RenameToNestedPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	fs := setupTestFilesystem(t, map[string]string{
+		"source.txt":                "source content",
+		"existing_dir/":             "",
+		"existing_dir/nested/":      "",
+		"existing_dir/nested/deep/": "",
+	})
+	defer fs.Cleanup()
+
+	fs.Rename("source.txt", "existing_dir/nested/deep/renamed.txt")
+
+	fs.AssertFileNotExists("source.txt")
+	fs.AssertFileContent("existing_dir/nested/deep/renamed.txt", "source content")
+	fs.AssertSourceUnchanged("source.txt", "source content")
+}
+
+// TestEdgeCase_RenameDirectoryWithContents verifies renaming directory preserves contents
+func TestEdgeCase_RenameDirectoryWithContents(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	fs := setupTestFilesystem(t, map[string]string{
+		"mydir/file1.txt":        "content1",
+		"mydir/file2.txt":        "content2",
+		"mydir/subdir/file3.txt": "content3",
+	})
+	defer fs.Cleanup()
+
+	tu.ShouldRenameDir(fs.MountPath("mydir"), fs.MountPath("renamed_dir"), t)
+
+	tu.ShouldNotExist(fs.MountPath("mydir"), t)
+	fs.AssertFileContent("renamed_dir/file1.txt", "content1")
+	fs.AssertFileContent("renamed_dir/file2.txt", "content2")
+	fs.AssertFileContent("renamed_dir/subdir/file3.txt", "content3")
+}
+
+// TestEdgeCase_SequentialRenames verifies chained renames (A→B→C)
+func TestEdgeCase_SequentialRenames(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	fs := setupTestFilesystem(t, map[string]string{
+		"original.txt": "test content",
+	})
+	defer fs.Cleanup()
+
+	fs.Rename("original.txt", "step1.txt")
+	fs.AssertFileNotExists("original.txt")
+	fs.AssertFileContent("step1.txt", "test content")
+
+	fs.Rename("step1.txt", "step2.txt")
+	fs.AssertFileNotExists("step1.txt")
+	fs.AssertFileContent("step2.txt", "test content")
+
+	fs.Rename("step2.txt", "final.txt")
+	fs.AssertFileNotExists("step2.txt")
+	fs.AssertFileContent("final.txt", "test content")
+
+	fs.AssertSourceUnchanged("original.txt", "test content")
+}
+
+// TestEdgeCase_RenameOverExistingFile verifies rename replaces existing file
+func TestEdgeCase_RenameOverExistingFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	fs := setupTestFilesystem(t, map[string]string{
+		"source.txt": "new content",
+		"target.txt": "old content",
+	})
+	defer fs.Cleanup()
+
+	fs.Rename("source.txt", "target.txt")
+
+	fs.AssertFileNotExists("source.txt")
+	fs.AssertFileContent("target.txt", "new content")
+}
+
+// TestEdgeCase_UnicodeFilenames verifies handling of unicode characters in filenames
+func TestEdgeCase_UnicodeFilenames(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	fs := setupTestFilesystem(t, map[string]string{
+		"файл.txt":        "russian content",
+		"文件名.txt":         "chinese content",
+		"ファイル.txt":        "japanese content",
+		"émoji_🎉.txt":     "emoji content",
+		"café_résumé.txt": "accented content",
+	})
+	defer fs.Cleanup()
+
+	fs.AssertFileContent("файл.txt", "russian content")
+	fs.AssertFileContent("文件名.txt", "chinese content")
+	fs.AssertFileContent("ファイル.txt", "japanese content")
+	fs.AssertFileContent("émoji_🎉.txt", "emoji content")
+	fs.AssertFileContent("café_résumé.txt", "accented content")
+}
+
+// TestEdgeCase_SpecialCharacters verifies handling of special characters in filenames
+func TestEdgeCase_SpecialCharacters(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	fs := setupTestFilesystem(t, map[string]string{
+		"file with spaces.txt":      "spaces",
+		"file-with-dashes.txt":      "dashes",
+		"file_with_underscores.txt": "underscores",
+		"file.multiple.dots.txt":    "dots",
+	})
+	defer fs.Cleanup()
+
+	fs.AssertFileContent("file with spaces.txt", "spaces")
+	fs.AssertFileContent("file-with-dashes.txt", "dashes")
+	fs.AssertFileContent("file_with_underscores.txt", "underscores")
+	fs.AssertFileContent("file.multiple.dots.txt", "dots")
+}
+
+// TestEdgeCase_EmptyFile verifies handling of empty files
+func TestEdgeCase_EmptyFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	fs := setupTestFilesystem(t, map[string]string{
+		"empty.txt": "",
+		"small.txt": "x",
+	})
+	defer fs.Cleanup()
+
+	fs.AssertFileContent("empty.txt", "")
+	fs.AssertFileContent("small.txt", "x")
+
+	fs.Rename("empty.txt", "renamed_empty.txt")
+	fs.AssertFileNotExists("empty.txt")
+	fs.AssertFileContent("renamed_empty.txt", "")
+}
+
+// TestEdgeCase_DeepNesting verifies deeply nested directory operations
+func TestEdgeCase_DeepNesting(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	fs := setupTestFilesystem(t, map[string]string{
+		"level1/level2/level3/level4/level5/deep.txt": "deep content",
+	})
+	defer fs.Cleanup()
+
+	fs.AssertFileContent("level1/level2/level3/level4/level5/deep.txt", "deep content")
+
+	fs.Rename("level1/level2/level3/level4/level5/deep.txt", "level1/level2/level3/level4/level5/renamed.txt")
+	fs.AssertFileNotExists("level1/level2/level3/level4/level5/deep.txt")
+	fs.AssertFileContent("level1/level2/level3/level4/level5/renamed.txt", "deep content")
+}
+
+// TestEdgeCase_LongFilename verifies handling of long filenames
+func TestEdgeCase_LongFilename(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	longName := ""
+	for i := 0; i < 20; i++ {
+		longName += "longname"
+	}
+	longName += ".txt"
+
+	fs := setupTestFilesystem(t, map[string]string{
+		longName: "long name content",
+	})
+	defer fs.Cleanup()
+
+	fs.AssertFileContent(longName, "long name content")
+}
+
+// TestEdgeCase_RenameThenRead verifies rename followed by immediate read
+func TestEdgeCase_RenameThenRead(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	fs := setupTestFilesystem(t, map[string]string{
+		"original.txt": "test content",
+	})
+	defer fs.Cleanup()
+
+	fs.Rename("original.txt", "renamed.txt")
+	fs.AssertFileContent("renamed.txt", "test content")
+}
+
+// TestEdgeCase_MultipleFilesRename verifies renaming multiple files at once
+func TestEdgeCase_MultipleFilesRename(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	fs := setupTestFilesystem(t, map[string]string{
+		"file1.txt": "content1",
+		"file2.txt": "content2",
+		"file3.txt": "content3",
+	})
+	defer fs.Cleanup()
+
+	fs.Rename("file1.txt", "renamed1.txt")
+	fs.Rename("file2.txt", "renamed2.txt")
+	fs.Rename("file3.txt", "renamed3.txt")
+
+	fs.AssertFileNotExists("file1.txt")
+	fs.AssertFileNotExists("file2.txt")
+	fs.AssertFileNotExists("file3.txt")
+	fs.AssertFileContent("renamed1.txt", "content1")
+	fs.AssertFileContent("renamed2.txt", "content2")
+	fs.AssertFileContent("renamed3.txt", "content3")
+}
+
+// TestEdgeCase_DeleteThenRecreate verifies deleting and recreating a file
+func TestEdgeCase_DeleteThenRecreate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	fs := setupTestFilesystem(t, map[string]string{
+		"test.txt": "original content",
+	})
+	defer fs.Cleanup()
+
+	fs.AssertFileContent("test.txt", "original content")
+	fs.RemoveFile("test.txt")
+	fs.AssertFileNotExists("test.txt")
+
+	fs.WriteFileInMount("test.txt", []byte("new content"))
+	fs.AssertFileContent("test.txt", "new content")
+}
+
+// TestEdgeCase_RenameDirectoryThenAccessFiles verifies renaming directory preserves file access
+func TestEdgeCase_RenameDirectoryThenAccessFiles(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	fs := setupTestFilesystem(t, map[string]string{
+		"dir/file1.txt": "content1",
+		"dir/file2.txt": "content2",
+	})
+	defer fs.Cleanup()
+
+	fs.Rename("dir", "newdir")
+	fs.AssertFileNotExists("dir/file1.txt")
+	fs.AssertFileNotExists("dir/file2.txt")
+	fs.AssertFileContent("newdir/file1.txt", "content1")
+	fs.AssertFileContent("newdir/file2.txt", "content2")
+}

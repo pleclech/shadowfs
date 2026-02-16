@@ -54,7 +54,7 @@ func (op *LookupOperation) Lookup(
 	}
 
 	// 4. Check if path is marked as deleted in cache
-	deleted, errno := op.cacheMgr.IsDeleted(sourcePath)
+	deleted, errno := op.cacheMgr.IsDeleted(cachePath)
 	if errno != 0 && errno != syscall.ENODATA {
 		return nil, errno
 	}
@@ -84,6 +84,11 @@ func (op *LookupOperation) lookupInCache(
 	attr, exists, errno := xattrMgr.GetStatus(cachePath)
 	if errno != 0 && errno != syscall.ENODATA {
 		return nil, errno
+	}
+
+	// Handle deletion markers - return ENOENT so Lookup falls through to check source
+	if exists && attr.PathStatus == xattr.PathStatusDeleted {
+		return nil, syscall.ENOENT
 	}
 
 	// Handle type replacement scenario

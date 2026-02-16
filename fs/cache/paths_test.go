@@ -200,3 +200,85 @@ func TestGetDaemonLogFilePath(t *testing.T) {
 		tu.Failf(t, "Expected %s, got %s", expectedPath, logPath)
 	}
 }
+
+func TestGetSocketPath(t *testing.T) {
+	originalEnv := os.Getenv("SHADOWFS_CACHE_DIR")
+	defer os.Setenv("SHADOWFS_CACHE_DIR", originalEnv)
+
+	mountID := "abc123def456"
+
+	testDir := "/test/cache/dir"
+	os.Setenv("SHADOWFS_CACHE_DIR", testDir)
+	socketPath, err := GetSocketPath(mountID)
+	if err != nil {
+		tu.Failf(t, "GetSocketPath failed: %v", err)
+	}
+	absTestDir, _ := filepath.Abs(testDir)
+	expectedPath := filepath.Join(absTestDir, "daemons", mountID+".sock")
+	if socketPath != expectedPath {
+		tu.Failf(t, "Expected %s, got %s", expectedPath, socketPath)
+	}
+
+	os.Unsetenv("SHADOWFS_CACHE_DIR")
+	socketPath, err = GetSocketPath(mountID)
+	if err != nil {
+		tu.Failf(t, "GetSocketPath failed: %v", err)
+	}
+	homeDir, _ := os.UserHomeDir()
+	expectedPath = filepath.Join(homeDir, ".shadowfs", "daemons", mountID+".sock")
+	if socketPath != expectedPath {
+		tu.Failf(t, "Expected %s, got %s", expectedPath, socketPath)
+	}
+}
+
+func TestFindCacheDirectoryForMount_NotFound(t *testing.T) {
+	originalEnv := os.Getenv("SHADOWFS_CACHE_DIR")
+	defer os.Setenv("SHADOWFS_CACHE_DIR", originalEnv)
+
+	tempDir, err := os.MkdirTemp("", "cache-test")
+	if err != nil {
+		tu.Failf(t, "Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	os.Setenv("SHADOWFS_CACHE_DIR", tempDir)
+
+	_, err = FindCacheDirectoryForMount("/nonexistent/mount/point")
+	if err == nil {
+		tu.Failf(t, "Expected error for non-existent mount point")
+	}
+}
+
+func TestFindCacheDirectoryForMount_Found(t *testing.T) {
+	originalEnv := os.Getenv("SHADOWFS_CACHE_DIR")
+	defer os.Setenv("SHADOWFS_CACHE_DIR", originalEnv)
+
+	tempDir, err := os.MkdirTemp("", "cache-test")
+	if err != nil {
+		tu.Failf(t, "Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	os.Setenv("SHADOWFS_CACHE_DIR", tempDir)
+
+	mountPoint := "/test/mount"
+	srcDir := "/test/source"
+	mountID := ComputeMountID(mountPoint, srcDir)
+
+	sessionPath := GetSessionPath(tempDir, mountID)
+	os.MkdirAll(sessionPath, 0755)
+
+	targetFile := GetTargetFilePath(sessionPath)
+	os.WriteFile(targetFile, []byte(srcDir), 0644)
+
+	cachePath := GetCachePath(sessionPath)
+	os.MkdirAll(cachePath, 0755)
+
+	foundSession, err := FindCacheDirectoryForMount(mountPoint)
+	if err != nil {
+		tu.Failf(t, "FindCacheDirectoryForMount failed: %v", err)
+	}
+	if foundSession != sessionPath {
+		tu.Failf(t, "Expected %s, got %s", sessionPath, foundSession)
+	}
+}

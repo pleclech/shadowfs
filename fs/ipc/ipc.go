@@ -13,7 +13,9 @@ import (
 
 // Command constants
 const (
-	CmdMarkDirty = "MARK_DIRTY"
+	CmdMarkDirty   = "MARK_DIRTY"
+	CmdRefresh     = "REFRESH"
+	CmdRestoreFile = "RESTORE_FILE"
 )
 
 // Response constants
@@ -24,8 +26,12 @@ const (
 
 // ControlServer handles IPC commands from CLI processes
 type ControlServer struct {
-	listener   net.Listener
-	root       interface{ MarkDirty(filePath string) } // Interface to avoid circular dependency
+	listener net.Listener
+	root     interface {
+		MarkDirty(filePath string)
+		Refresh(path string)
+		RestoreFile(path string)
+	} // Interface to avoid circular dependency
 	socketPath string
 	wg         sync.WaitGroup
 	mu         sync.RWMutex
@@ -33,7 +39,11 @@ type ControlServer struct {
 }
 
 // NewControlServer creates a new IPC control server
-func NewControlServer(socketPath string, root interface{ MarkDirty(filePath string) }) (*ControlServer, error) {
+func NewControlServer(socketPath string, root interface {
+	MarkDirty(filePath string)
+	Refresh(path string)
+	RestoreFile(path string)
+}) (*ControlServer, error) {
 	listener, err := listenSocket(socketPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create IPC listener: %w", err)
@@ -150,6 +160,22 @@ func (s *ControlServer) handleCommand(cmdLine string) string {
 		s.root.MarkDirty(mountPointPath)
 		return RespOK
 
+	case CmdRefresh:
+		if len(args) != 1 {
+			return fmt.Sprintf("%s REFRESH requires one argument", RespError)
+		}
+		mountPointPath := args[0]
+		s.root.Refresh(mountPointPath)
+		return RespOK
+
+	case CmdRestoreFile:
+		if len(args) != 1 {
+			return fmt.Sprintf("%s RESTORE_FILE requires one argument", RespError)
+		}
+		mountPointPath := args[0]
+		s.root.RestoreFile(mountPointPath)
+		return RespOK
+
 	default:
 		return fmt.Sprintf("%s unknown command: %s", RespError, cmd)
 	}
@@ -181,6 +207,56 @@ func (c *ControlClient) MarkDirty(path string) error {
 	cmd := fmt.Sprintf("%s %s\n", CmdMarkDirty, path)
 	if _, err := c.conn.Write([]byte(cmd)); err != nil {
 		return fmt.Errorf("failed to send MARK_DIRTY command: %w", err)
+	}
+
+	// Read response
+	scanner := bufio.NewScanner(c.conn)
+	if !scanner.Scan() {
+		return fmt.Errorf("failed to read response")
+	}
+
+	response := strings.TrimSpace(scanner.Text())
+	if response != RespOK {
+		return fmt.Errorf("server returned error: %s", response)
+	}
+
+	return nil
+}
+
+// Refresh sends a REFRESH command to invalidate FUSE cache for a path
+func (c *ControlClient) Refresh(path string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	cmd := fmt.Sprintf("%s %s\n", CmdRefresh, path)
+	if _, err := c.conn.Write([]byte(cmd)); err != nil {
+		return fmt.Errorf("failed to send REFRESH command: %w", err)
+	}
+
+	// Read response
+	scanner := bufio.NewScanner(c.conn)
+	if !scanner.Scan() {
+		return fmt.Errorf("failed to read response")
+	}
+
+	response := strings.TrimSpace(scanner.Text())
+	if response != RespOK {
+		return fmt.Errorf("server returned error: %s", response)
+	}
+
+	return nil
+}
+
+// RestoreFile sends a RESTORE_FILE command to restore a file and invalidate directory entry
+// This is used when a file is restored from git - it marks the file as dirty AND
+// invalidates the parent directory entry so the kernel knows about the new file
+func (c *ControlClient) RestoreFile(path string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	cmd := fmt.Sprintf("%s %s\n", CmdRestoreFile, path)
+	if _, err := c.conn.Write([]byte(cmd)); err != nil {
+		return fmt.Errorf("failed to send RESTORE_FILE command: %w", err)
 	}
 
 	// Read response
@@ -232,12 +308,12 @@ func SocketExists(socketPath string) bool {
 		conn.Close()
 		return true
 	}
-	
+
 	// For regular filesystem sockets, check if file exists first
 	if _, err := os.Stat(socketPath); err != nil {
 		return false
 	}
-	
+
 	// Try to connect to verify the socket is active
 	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
@@ -246,4 +322,3 @@ func SocketExists(socketPath string) bool {
 	conn.Close()
 	return true
 }
-

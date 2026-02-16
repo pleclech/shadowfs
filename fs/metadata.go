@@ -21,7 +21,7 @@ type Metadata struct {
 const MetadataDir = ".shadowfs-metadata"
 
 // getMetadataPath returns the path to the metadata file for a given relative path
-func (gm *GitManager) getMetadataPath(relativePath string) string {
+func (gm *GitManager) getRelativeMetadataPath(relativePath string) string {
 	if strings.HasPrefix(relativePath, MetadataDir+"/") && strings.HasSuffix(relativePath, ".json") {
 		return relativePath
 	}
@@ -51,49 +51,29 @@ func (gm *GitManager) storeXAttrMetadata(metadataPath string, metadata Metadata)
 	return nil
 }
 
-// loadXAttrMetadata loads metadata from a JSON file in .shadowfs-metadata/
-func (gm *GitManager) loadXAttrMetadata(relativePath string) (*Metadata, error) {
-	metadataPath := gm.getMetadataPath(relativePath)
-
-	// Check if metadata file exists
-	if _, err := os.Stat(metadataPath); err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil // No metadata file, not an error
-		}
-		return nil, fmt.Errorf("failed to stat metadata file %s: %w", metadataPath, err)
-	}
-
-	// Read metadata file
-	jsonData, err := os.ReadFile(metadataPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read metadata file %s: %w", metadataPath, err)
-	}
-
-	// Unmarshal JSON
-	var metadata Metadata
-	if err := json.Unmarshal(jsonData, &metadata); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal metadata from %s: %w", metadataPath, err)
-	}
-
-	return &metadata, nil
-}
-
 // loadXAttrMetadataFromCommit loads metadata from a specific commit
 func (gm *GitManager) loadXAttrMetadataFromCommit(commitHash, relativePath string) (string, *Metadata, error) {
-	metadataPath := gm.getMetadataPath(relativePath)
+	metadataPath := gm.getRelativeMetadataPath(relativePath)
 
 	r, w := io.Pipe()
 	defer r.Close()
 	defer w.Close()
 
+	errChan := make(chan error, 1)
 	go func() {
-		_ = gm.executeGitCommand([]string{"show", commitHash + ":" + metadataPath}, w, os.Stderr)
+		err := gm.executeGitCommand([]string{"show", commitHash + ":" + metadataPath}, w, os.Stderr)
 		w.Close()
+		errChan <- err
 	}()
 
-	// create json decoder from pipe reader
 	var metadata Metadata
 	if err := json.NewDecoder(r).Decode(&metadata); err != nil {
+		// Check if the error is because the file doesn't exist in this commit
+		gitErr := <-errChan
+		if gitErr != nil && strings.Contains(gitErr.Error(), "does not exist") {
+			Debug("loadXAttrMetadataFromCommit: No metadata for %s at commit %s (file not in commit)", relativePath, commitHash)
+			return metadataPath, nil, nil
+		}
 		return metadataPath, nil, fmt.Errorf("failed to decode metadata from commit %s: %w", commitHash, err)
 	}
 
